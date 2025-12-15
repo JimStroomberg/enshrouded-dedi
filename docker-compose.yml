@@ -1,0 +1,148 @@
+services:
+  enshrouded:
+    image: powermountain/enshrouded-dedi-server:latest
+    build:
+      context: ./docker/enshrouded
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SERVER_NAME: ${SERVER_NAME}
+      SERVER_PASSWORD: ${SERVER_PASSWORD}
+      MAX_PLAYERS: ${MAX_PLAYERS}
+      GAME_PORT: ${GAME_PORT}
+      QUERY_PORT: ${QUERY_PORT}
+      SAVE_DIR: ${SAVE_DIR}
+      TZ: ${TZ}
+      UPDATE_ON_START: ${UPDATE_ON_START}
+    volumes:
+      - enshrouded_data:/data
+    ports:
+      - "${GAME_PORT:-15636}:15636/udp"
+      - "${GAME_PORT:-15636}:15636/tcp"
+      - "${QUERY_PORT:-15637}:15637/udp"
+      - "${QUERY_PORT:-15637}:15637/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f enshrouded_server || ss -lntu | grep -q 15636" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - enshrouded_net
+
+  backup:
+    image: powermountain/enshrouded-dedi-backup:latest
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      BACKUP_SAVE_DIR: ${BACKUP_SAVE_DIR}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY}
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
+      BACKUP_S3_SSL: ${BACKUP_S3_SSL}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS}
+      BACKUP_RETENTION_DAILIES: ${BACKUP_RETENTION_DAILIES}
+      BACKUP_RETENTION_WEEKLIES: ${BACKUP_RETENTION_WEEKLIES}
+      BACKUP_RETENTION_MONTHLIES: ${BACKUP_RETENTION_MONTHLIES}
+      BACKUP_BIND_ADDR: ${BACKUP_BIND_ADDR}
+      ENSHROUDED_CONTAINER_NAME: ${ENSHROUDED_CONTAINER_NAME}
+      BACKUP_LOG_LEVEL: ${BACKUP_LOG_LEVEL}
+      TZ: ${TZ}
+    volumes:
+      - enshrouded_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      enshrouded:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - enshrouded_net
+
+  ui:
+    image: powermountain/enshrouded-dedi-ui:latest
+    build:
+      context: .
+      dockerfile: docker/ui/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STACK_NAME: ${STACK_NAME}
+      UI_ADMIN_USERNAME: ${UI_ADMIN_USERNAME}
+      UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD}
+      UI_SESSION_SECRET: ${UI_SESSION_SECRET}
+      BACKUP_API_URL: ${BACKUP_API_URL}
+      TZ: ${TZ}
+    ports:
+      - "8080:8080"
+    depends_on:
+      backup:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - enshrouded_net
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:9001
+      MINIO_REGION: ${MINIO_REGION}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - enshrouded_net
+
+  minio-init:
+    image: minio/mc:latest
+    env_file: .env
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      set -eu
+      mc alias set minio http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+      mc mb -p minio/"$MINIO_BUCKET" || true
+      mc anonymous set none minio/"$MINIO_BUCKET"
+      mc version enable minio/"$MINIO_BUCKET"
+      if [ -n "$MINIO_RETENTION_DAYS" ]; then
+        mc ilm rule add --id retain-default --expire-days "$MINIO_RETENTION_DAYS" --noncurrent-expire-days "$MINIO_RETENTION_DAYS" minio/"$MINIO_BUCKET" || true
+      fi
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - enshrouded_net
+    restart: "no"
+
+volumes:
+  enshrouded_data:
+  minio_data:
+
+networks:
+  enshrouded_net:
+    driver: bridge

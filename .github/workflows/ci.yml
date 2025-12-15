@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Validate compose
+        run: docker compose config
+      - name: Go fmt
+        run: |
+          gofmt -w cmd
+          git diff --exit-code
+      - name: Go test
+        run: go test ./cmd/...
+
+  trigger-docker-hub:
+    if: github.event_name == 'release' && github.event.action == 'created'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Docker Hub
+        env:
+          DOCKER_HUB_HOOK_URL: ${{ secrets.DOCKER_HUB_HOOK_URL }}
+        run: |
+          if [ -z "$DOCKER_HUB_HOOK_URL" ]; then
+            echo "DOCKER_HUB_HOOK_URL secret not set" >&2
+            exit 1
+          fi
+          curl -X POST -H "Content-Type: application/json" -d '{"build": true}' "$DOCKER_HUB_HOOK_URL"

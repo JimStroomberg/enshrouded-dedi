@@ -1,0 +1,6 @@
+services:
+  enshrouded:
+    # Force the game server to run as amd64 even on arm64 hosts (uses binfmt/qemu).
+    platform: linux/amd64
+    build:
+      platform: linux/amd64
