@@ -4,7 +4,6 @@ services:
     platform: linux/amd64
     build:
       context: ./docker/enshrouded
-      platform: linux/amd64
     container_name: enshrouded
     restart: unless-stopped
     env_file: .env
@@ -39,7 +38,6 @@ services:
     build:
       context: .
       dockerfile: docker/backup/Dockerfile
-      platform: linux/amd64
     restart: unless-stopped
     env_file: .env
     environment:
@@ -80,7 +78,6 @@ services:
     build:
       context: .
       dockerfile: docker/ui/Dockerfile
-      platform: linux/amd64
     restart: unless-stopped
     env_file: .env
     environment:
