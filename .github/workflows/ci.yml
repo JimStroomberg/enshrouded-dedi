@@ -25,6 +25,46 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+      - name: Create CI .env
+        run: |
+          cat > .env <<'EOF'
+          STACK_NAME=CI Stack
+          TZ=Etc/UTC
+          UI_ADMIN_USERNAME=admin
+          UI_ADMIN_PASSWORD=changeme
+          UI_SESSION_SECRET=ci-session-secret
+          UI_SESSION_HOURS=24
+          BACKUP_API_URL=http://backup:7000
+          UI_LOGO_URL=https://example.invalid/logo.png
+
+          SERVER_NAME=ci-server
+          SERVER_PASSWORD=
+          MAX_PLAYERS=16
+          GAME_PORT=15636
+          QUERY_PORT=15637
+          SAVE_DIR=/data/savegame
+          UPDATE_ON_START=true
+
+          BACKUP_INTERVAL_HOURS=24
+          BACKUP_RETENTION_DAILIES=14
+          BACKUP_RETENTION_WEEKLIES=8
+          BACKUP_RETENTION_MONTHLIES=12
+          BACKUP_SAVE_DIR=/data/savegame
+          BACKUP_BIND_ADDR=0.0.0.0:7000
+          ENSHROUDED_CONTAINER_NAME=enshrouded
+          BACKUP_LOG_LEVEL=info
+          BACKUP_S3_ENDPOINT=http://minio:9000
+          BACKUP_S3_ACCESS_KEY=enshrouded
+          BACKUP_S3_SECRET_KEY=changeme
+          BACKUP_S3_BUCKET=enshrouded-backups
+          BACKUP_S3_SSL=false
+
+          MINIO_ROOT_USER=enshrouded
+          MINIO_ROOT_PASSWORD=changeme
+          MINIO_BUCKET=enshrouded-backups
+          MINIO_RETENTION_DAYS=180
+          MINIO_REGION=us-east-1
+          EOF
       - name: Validate compose
         run: docker compose config
       - name: Go fmt
