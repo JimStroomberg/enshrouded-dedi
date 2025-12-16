@@ -10,6 +10,7 @@ LOG_DIR="/data/logs"
 RATE_LIMIT_FILE="/data/steam_rate_limit.lock"
 STEAM_HOME="/data/steamcmd-home"
 WINE_BIN="/usr/bin/wine"
+STEAM_AUTH_FILE="/data/steam_auth.env"
 if [ ! -x "$WINE_BIN" ] && [ -x "/usr/bin/wine64" ]; then
   WINE_BIN="/usr/bin/wine64"
 fi
@@ -37,10 +38,9 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 load_steam_auth() {
-  local auth_file="/data/steam_auth.env"
-  if [ -f "$auth_file" ]; then
+  if [ -f "$STEAM_AUTH_FILE" ]; then
     # shellcheck disable=SC1090
-    set -a && source "$auth_file" && set +a
+    set -a && source "$STEAM_AUTH_FILE" && set +a
   fi
 }
 
@@ -122,9 +122,9 @@ update_server() {
 
     if [ "$rc" -eq 0 ]; then
       rm -f "$RATE_LIMIT_FILE"
-      if [ -n "${STEAM_GUARD_CODE:-}" ] && [ -f "$AUTH_FILE" ]; then
+      if [ -n "${STEAM_GUARD_CODE:-}" ] && [ -f "$STEAM_AUTH_FILE" ]; then
         # Guard code is one-time; drop it after a successful login to avoid repeated 2FA prompts.
-        sed -i '/^STEAM_GUARD_CODE=/d' "$AUTH_FILE" || true
+        sed -i '/^STEAM_GUARD_CODE=/d' "$STEAM_AUTH_FILE" || true
         unset STEAM_GUARD_CODE
         echo "[enshrouded] cleared one-time Steam Guard code after successful login."
       fi
