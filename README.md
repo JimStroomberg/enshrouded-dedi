@@ -1,7 +1,7 @@
 # Enshrouded Dedicated Server Stack
 
 One-command Docker Compose stack to run an Enshrouded dedicated server with:
-- Wine-based server container (amd64). ARM is no longer supported.
+- Wine-based server container (amd64).
 - Minimal Go admin UI (login-protected) to restart/update, trigger backups, restore, upload saves, and download logs.
 - Backup sidecar with scheduled + manual backups to MinIO (S3-compatible) and retention (14 daily / 8 weekly / 12 monthly by default).
 - MinIO for bundled S3 storage (versioning on, retention ready).
@@ -34,6 +34,7 @@ Copy `.env.example` and adjust:
 ## Admin UI usage
 - Public status at `http://localhost:8080`.
 - Log in with `UI_ADMIN_USERNAME` / `UI_ADMIN_PASSWORD`. Sessions expire after 24h by default (`UI_SESSION_HOURS`).
+- Status shows current server state plus live player count (via A2S on the query port).
 - Admin actions:
   - Restart or “trigger update” (restart → SteamCMD runs on start).
   - Backup now.

@@ -8,12 +8,14 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -30,14 +32,24 @@ type UIConfig struct {
 	SessionSecret string
 	BackupAPI     string
 	SessionHours  int
+	A2SEnabled    bool
+	A2SAddr       string
+	A2STimeout    time.Duration
+	A2SCacheTTL   time.Duration
 }
 
 type Server struct {
-	cfg    UIConfig
-	store  *sessions.CookieStore
-	client *http.Client
-	logger *log.Logger
-	tmpl   *template.Template
+	cfg         UIConfig
+	store       *sessions.CookieStore
+	client      *http.Client
+	logger      *log.Logger
+	tmpl        *template.Template
+	a2sMu       sync.Mutex
+	a2sCached   a2sCache
+	a2sEnabled  bool
+	a2sAddr     string
+	a2sTimeout  time.Duration
+	a2sCacheTTL time.Duration
 }
 
 type statusResponse struct {
@@ -63,6 +75,28 @@ type backupItem struct {
 	LastModified time.Time `json:"LastModified"`
 }
 
+type a2sInfo struct {
+	Name       string `json:"name"`
+	Map        string `json:"map"`
+	Players    int    `json:"players"`
+	MaxPlayers int    `json:"max_players"`
+	Bots       int    `json:"bots"`
+	Version    string `json:"version"`
+	VAC        bool   `json:"vac"`
+}
+
+type a2sCache struct {
+	info *a2sInfo
+	err  error
+	ts   time.Time
+}
+
+type apiStatus struct {
+	Status *statusResponse `json:"status,omitempty"`
+	Stats  *a2sInfo        `json:"stats,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
 func main() {
 	cfg := UIConfig{
 		StackName:     getenv("STACK_NAME", "Enshrouded Stack"),
@@ -73,6 +107,10 @@ func main() {
 		SessionSecret: getenv("UI_SESSION_SECRET", "change-me"),
 		BackupAPI:     getenv("BACKUP_API_URL", "http://backup:7000"),
 		SessionHours:  atoiEnv("UI_SESSION_HOURS", 24),
+		A2SEnabled:    envBool("A2S_ENABLED", true),
+		A2SAddr:       getenv("A2S_ADDR", "enshrouded:15637"),
+		A2STimeout:    durationMsEnv("A2S_TIMEOUT_MS", 1500),
+		A2SCacheTTL:   durationSecEnv("A2S_CACHE_SECONDS", 10),
 	}
 
 	store := sessions.NewCookieStore([]byte(cfg.SessionSecret))
@@ -83,11 +121,15 @@ func main() {
 	}).Parse(pageTemplate))
 
 	srv := &Server{
-		cfg:    cfg,
-		store:  store,
-		client: &http.Client{Timeout: 10 * time.Second},
-		logger: log.New(os.Stdout, "ui ", log.LstdFlags|log.Lmsgprefix),
-		tmpl:   tmpl,
+		cfg:         cfg,
+		store:       store,
+		client:      &http.Client{Timeout: 10 * time.Second},
+		logger:      log.New(os.Stdout, "ui ", log.LstdFlags|log.Lmsgprefix),
+		tmpl:        tmpl,
+		a2sEnabled:  cfg.A2SEnabled,
+		a2sAddr:     cfg.A2SAddr,
+		a2sTimeout:  cfg.A2STimeout,
+		a2sCacheTTL: cfg.A2SCacheTTL,
 	}
 
 	r := mux.NewRouter()
@@ -128,6 +170,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if fetched, err := s.fetchSteamState(r.Context()); err == nil && fetched != nil {
 		st = fetched
 	}
+	stats, statsErr := s.fetchServerStats(r.Context())
+	if statsErr != nil {
+		s.logger.Printf("a2s query error: %v", statsErr)
+	}
 	var backups []backupItem
 	if loggedIn {
 		backups, _ = s.fetchBackups(r.Context())
@@ -139,6 +185,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"LogoURL":    s.cfg.LogoURL,
 		"SteamState": st,
 		"Status":     status,
+		"Stats":      stats,
+		"StatsErr":   statsErr,
 		"Backups":    backups,
 		"LoggedIn":   loggedIn,
 		"Message":    r.URL.Query().Get("msg"),
@@ -285,12 +333,14 @@ func (s *Server) handleActionUpload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 	status, err := s.fetchStatus(r.Context())
+	stats, _ := s.fetchServerStats(r.Context())
+	resp := apiStatus{Status: status, Stats: stats}
 	if err != nil {
-		http.Error(w, "failed to fetch status", http.StatusBadGateway)
-		return
+		resp.Error = "failed to fetch status"
+		w.WriteHeader(http.StatusBadGateway)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) fetchStatus(ctx context.Context) (*statusResponse, error) {
@@ -336,6 +386,30 @@ func (s *Server) fetchSteamState(ctx context.Context) (*steamState, error) {
 		return &steamState{Mode: "unset"}, nil
 	}
 	return &st, nil
+}
+
+func (s *Server) fetchServerStats(ctx context.Context) (*a2sInfo, error) {
+	if !s.a2sEnabled {
+		return nil, nil
+	}
+	now := time.Now()
+	s.a2sMu.Lock()
+	if s.a2sCached.info != nil || s.a2sCached.err != nil {
+		if now.Sub(s.a2sCached.ts) < s.a2sCacheTTL {
+			info := s.a2sCached.info
+			err := s.a2sCached.err
+			s.a2sMu.Unlock()
+			return info, err
+		}
+	}
+	s.a2sMu.Unlock()
+
+	info, err := queryA2S(s.a2sAddr, s.a2sTimeout)
+
+	s.a2sMu.Lock()
+	s.a2sCached = a2sCache{info: info, err: err, ts: time.Now()}
+	s.a2sMu.Unlock()
+	return info, err
 }
 
 func (s *Server) triggerPOST(path string, payload interface{}) error {
@@ -417,6 +491,131 @@ func atoiEnv(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := strings.ToLower(os.Getenv(key)); v != "" {
+		if v == "1" || v == "true" || v == "yes" || v == "on" {
+			return true
+		}
+		if v == "0" || v == "false" || v == "no" || v == "off" {
+			return false
+		}
+	}
+	return def
+}
+
+func durationMsEnv(key string, def int) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			return time.Duration(i) * time.Millisecond
+		}
+	}
+	return time.Duration(def) * time.Millisecond
+}
+
+func durationSecEnv(key string, def int) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			return time.Duration(i) * time.Second
+		}
+	}
+	return time.Duration(def) * time.Second
+}
+
+func queryA2S(addr string, timeout time.Duration) (*a2sInfo, error) {
+	if timeout <= 0 {
+		timeout = 1500 * time.Millisecond
+	}
+	conn, err := net.DialTimeout("udp", addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	payload := append([]byte{0xFF, 0xFF, 0xFF, 0xFF}, []byte("TSource Engine Query\x00")...)
+	if _, err := conn.Write(payload); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 1400)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	if n < 5 || buf[4] != 'I' {
+		return nil, fmt.Errorf("invalid A2S response")
+	}
+	data := buf[5:n]
+	off := 0
+	if len(data) < 1 {
+		return nil, fmt.Errorf("short A2S response")
+	}
+	off++ // protocol byte
+
+	name, err := readCString(data, &off)
+	if err != nil {
+		return nil, err
+	}
+	mapName, err := readCString(data, &off)
+	if err != nil {
+		return nil, err
+	}
+	// skip folder and game strings
+	if _, err := readCString(data, &off); err != nil {
+		return nil, err
+	}
+	if _, err := readCString(data, &off); err != nil {
+		return nil, err
+	}
+	if off+7 > len(data) {
+		return nil, fmt.Errorf("short A2S response")
+	}
+	// appID (2 bytes)
+	off += 2
+	players := int(data[off])
+	off++
+	maxPlayers := int(data[off])
+	off++
+	bots := int(data[off])
+	off++
+	// server type, environment, visibility
+	off += 3
+	if off >= len(data) {
+		return nil, fmt.Errorf("short A2S response")
+	}
+	vac := data[off] == 1
+	off++
+
+	version := ""
+	if off < len(data) {
+		if v, err := readCString(data, &off); err == nil {
+			version = v
+		}
+	}
+
+	return &a2sInfo{
+		Name:       name,
+		Map:        mapName,
+		Players:    players,
+		MaxPlayers: maxPlayers,
+		Bots:       bots,
+		Version:    version,
+		VAC:        vac,
+	}, nil
+}
+
+func readCString(data []byte, off *int) (string, error) {
+	if *off >= len(data) {
+		return "", fmt.Errorf("short A2S string")
+	}
+	idx := bytes.IndexByte(data[*off:], 0)
+	if idx == -1 {
+		return "", fmt.Errorf("unterminated A2S string")
+	}
+	start := *off
+	*off += idx + 1
+	return string(data[start : start+idx]), nil
 }
 
 const pageTemplate = `<!doctype html>
@@ -530,6 +729,13 @@ const pageTemplate = `<!doctype html>
             <div>
               <div>{{ .Status.Name }}</div>
               <div class="pill" style="margin-top:6px;">State: {{ .Status.State }}</div>
+              {{ if .Stats }}
+                <div class="pill" style="margin-top:6px;">Players: {{ .Stats.Players }} / {{ .Stats.MaxPlayers }}</div>
+                {{ if .Stats.Version }}<div class="pill" style="margin-top:6px;">Build: {{ .Stats.Version }}</div>{{ end }}
+                {{ if .Stats.Map }}<div class="pill" style="margin-top:6px;">Map: {{ .Stats.Map }}</div>{{ end }}
+              {{ else if .StatsErr }}
+                <div class="pill status-pill warn" style="margin-top:6px;">Query failed; retry later.</div>
+              {{ end }}
             </div>
           </div>
         {{ else }}
