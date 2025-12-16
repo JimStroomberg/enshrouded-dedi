@@ -2,3 +2,4 @@
 .env.local
 .env.*
 **/.DS_Store
+docs/agent.md

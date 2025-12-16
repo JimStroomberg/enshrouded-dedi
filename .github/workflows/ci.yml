@@ -1,12 +1,19 @@
-name: CI
+name: Build & Push
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main, dev ]
+    tags: [ 'v*', '*.*.*' ]
   pull_request:
+    branches: [ main, dev ]
   workflow_dispatch:
-  release:
-    types: [created]
+
+env:
+  PLATFORMS: linux/amd64
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -27,17 +34,91 @@ jobs:
       - name: Go test
         run: go test ./cmd/...
 
-  trigger-docker-hub:
-    if: github.event_name == 'release' && github.event.action == 'created'
+  build:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            image: powermountain/enshrouded-dedi-server
+            context: docker/enshrouded
+            file: docker/enshrouded/Dockerfile
+          - name: backup
+            image: powermountain/enshrouded-dedi-backup
+            context: .
+            file: docker/backup/Dockerfile
+          - name: ui
+            image: powermountain/enshrouded-dedi-ui
+            context: .
+            file: docker/ui/Dockerfile
     steps:
-      - name: Trigger Docker Hub
-        env:
-          DOCKER_HUB_HOOK_URL: ${{ secrets.DOCKER_HUB_HOOK_URL }}
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine PR/fork context
+        id: ctx
+        shell: bash
         run: |
-          if [ -z "$DOCKER_HUB_HOOK_URL" ]; then
-            echo "DOCKER_HUB_HOOK_URL secret not set" >&2
-            exit 1
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
+            echo "is_fork_pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fork_pr=false" >> "$GITHUB_OUTPUT"
           fi
-          curl -X POST -H "Content-Type: application/json" -d '{"build": true}' "$DOCKER_HUB_HOOK_URL"
+
+      - name: Login to Docker Hub
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute tags
+        id: tags
+        shell: bash
+        run: |
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          REF_TYPE="${GITHUB_REF_TYPE}"   # branch|tag
+
+          # For PRs use the source branch; for pushes/tags use the ref name
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            SRC_NAME="${GITHUB_HEAD_REF}"
+          else
+            SRC_NAME="${GITHUB_REF_NAME}"  # main|dev|v1.2.3|...
+          fi
+
+          SAFE_NAME=$(echo "$SRC_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g')
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            VER="${SRC_NAME#v}"
+            TAGS="${{ matrix.image }}:${VER},${{ matrix.image }}:latest"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            TAGS="${{ matrix.image }}:pr-${SAFE_NAME}-${GITHUB_SHA::7}"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "main" ]; then
+            TAGS="${{ matrix.image }}:main-${GITHUB_SHA::7},${{ matrix.image }}:latest"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "dev" ]; then
+            TAGS="${{ matrix.image }}:dev-${GITHUB_SHA::7},${{ matrix.image }}:dev-latest"
+          else
+            TAGS="${{ matrix.image }}:${SAFE_NAME}-${GITHUB_SHA::7}"
+          fi
+
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push (${{ matrix.name }})
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' && steps.ctx.outputs.is_fork_pr != 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
