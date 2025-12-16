@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -131,6 +132,9 @@ func main() {
 	r.HandleFunc("/server/restart", svc.handleRestartServer).Methods(http.MethodPost)
 	r.HandleFunc("/server/update", svc.handleUpdateServer).Methods(http.MethodPost)
 	r.HandleFunc("/status", svc.handleStatus).Methods(http.MethodGet)
+	r.HandleFunc("/steam/auth", svc.handleSteamAuth).Methods(http.MethodPost)
+	r.HandleFunc("/steam/anonymous", svc.handleSteamAnonymous).Methods(http.MethodPost)
+	r.HandleFunc("/steam/state", svc.handleSteamState).Methods(http.MethodGet)
 
 	logger.Printf("listening on %s", cfg.BindAddr)
 	if err := http.ListenAndServe(cfg.BindAddr, r); err != nil {
@@ -281,6 +285,170 @@ func (s *BackupService) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, info)
+}
+
+func (s *BackupService) handleSteamAuth(w http.ResponseWriter, r *http.Request) {
+	type payload struct {
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+		GuardCode string `json:"guard_code"`
+	}
+	var p payload
+	if err := decodeJSON(r, &p); err != nil {
+		respondError(w, http.StatusBadRequest, fmt.Errorf("invalid payload: %w", err))
+		return
+	}
+	if strings.TrimSpace(p.Username) == "" || strings.TrimSpace(p.Password) == "" {
+		respondError(w, http.StatusBadRequest, errors.New("username and password required"))
+		return
+	}
+	if err := s.writeSteamAuthFile(p.Username, p.Password, p.GuardCode); err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	// Kick off a quick restart so the guard code is used immediately.
+	go func() {
+		if err := s.restartContainer(context.Background()); err != nil {
+			s.logger.Printf("steam auth: restart failed: %v", err)
+		}
+	}()
+	respondJSON(w, map[string]string{"status": "stored"})
+}
+
+func (s *BackupService) handleSteamState(w http.ResponseWriter, r *http.Request) {
+	state, err := s.readSteamState()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSON(w, state)
+}
+
+func (s *BackupService) handleSteamAnonymous(w http.ResponseWriter, r *http.Request) {
+	if err := s.writeSteamAnonymous(); err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go func() {
+		if err := s.restartContainer(context.Background()); err != nil {
+			s.logger.Printf("steam anonymous: restart failed: %v", err)
+		}
+	}()
+	respondJSON(w, map[string]string{"status": "anonymous"})
+}
+
+func (s *BackupService) writeSteamAuthFile(user, pass, guard string) error {
+	authPath := s.steamAuthPath()
+	content := fmt.Sprintf("STEAM_CHOSEN=1\nSTEAM_LOGIN=user\nSTEAM_USERNAME=%s\nSTEAM_PASSWORD=%s\n", user, pass)
+	if strings.TrimSpace(guard) != "" {
+		content += fmt.Sprintf("STEAM_GUARD_CODE=%s\n", guard)
+	}
+	if err := os.WriteFile(authPath, []byte(content), 0o600); err != nil {
+		return err
+	}
+	// The game container runs as uid/gid 1000 (steam). Best-effort chown so it can read the file.
+	_ = os.Chown(authPath, 1000, 1000)
+	return nil
+}
+
+func (s *BackupService) removeSteamAuthFile() error {
+	authPath := s.steamAuthPath()
+	if err := os.Remove(authPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *BackupService) writeSteamAnonymous() error {
+	authPath := s.steamAuthPath()
+	content := "STEAM_CHOSEN=1\nSTEAM_LOGIN=anonymous\n"
+	if err := os.WriteFile(authPath, []byte(content), 0o600); err != nil {
+		return err
+	}
+	_ = os.Chown(authPath, 1000, 1000)
+	return nil
+}
+
+type steamState struct {
+	Mode      string `json:"mode"`                // anonymous | user | unset
+	Username  string `json:"username"`            // optional
+	HasCreds  bool   `json:"has_creds"`           // true if username/password present
+	GuardHint bool   `json:"guard_hint"`
+	Chosen    bool   `json:"chosen"`
+	LastError string `json:"last_error,omitempty"`
+}
+
+func (s *BackupService) readSteamState() (*steamState, error) {
+	authPath := s.steamAuthPath()
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &steamState{Mode: "unset"}, nil
+		}
+		return nil, err
+	}
+	lines := strings.Split(string(data), "\n")
+	state := &steamState{Mode: "user"}
+	chosen := false
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "STEAM_LOGIN=") {
+			val := strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_LOGIN="))
+			if val != "" {
+				state.Mode = val
+			}
+		}
+		if strings.HasPrefix(ln, "STEAM_CHOSEN=") {
+			val := strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_CHOSEN="))
+			if val != "" && strings.ToLower(val) != "0" {
+				chosen = true
+			}
+		}
+		if strings.HasPrefix(ln, "STEAM_USERNAME=") {
+			state.Username = strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_USERNAME="))
+		}
+		if strings.HasPrefix(ln, "STEAM_PASSWORD=") && strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_PASSWORD=")) != "" {
+			state.HasCreds = true
+		}
+		if strings.HasPrefix(ln, "STEAM_GUARD_CODE=") && strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_GUARD_CODE=")) != "" {
+			state.GuardHint = true
+		}
+	}
+	state.Chosen = chosen
+	if state.Mode == "user" && !state.HasCreds {
+		state.Mode = "unset"
+	}
+	if !state.Chosen {
+		state.Mode = "unset"
+	}
+	state.LastError = s.lastSteamError()
+	return state, nil
+}
+
+func (s *BackupService) lastSteamError() string {
+	logPath := filepath.Join(filepath.Dir(s.cfg.SaveDir), "..", "logs", "steamcmd.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return ""
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	// Look from bottom for an error-ish line.
+	for i := len(lines) - 1; i >= 0; i-- {
+		ln := strings.TrimSpace(lines[i])
+		lc := strings.ToLower(ln)
+		if strings.Contains(lc, "error!") || strings.Contains(lc, "failed") || strings.Contains(lc, "no subscription") {
+			return ln
+		}
+	}
+	return ""
+}
+
+func (s *BackupService) steamAuthPath() string {
+	base := filepath.Dir(s.cfg.SaveDir)
+	return filepath.Join(base, "steam_auth.env")
 }
 
 func (s *BackupService) listBackups(ctx context.Context) ([]minio.ObjectInfo, error) {

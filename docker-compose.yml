@@ -1,8 +1,11 @@
 services:
   enshrouded:
     image: powermountain/enshrouded-dedi-server:latest
+    platform: linux/amd64
     build:
       context: ./docker/enshrouded
+      platform: linux/amd64
+    container_name: enshrouded
     restart: unless-stopped
     env_file: .env
     environment:
@@ -32,9 +35,11 @@ services:
 
   backup:
     image: powermountain/enshrouded-dedi-backup:latest
+    platform: linux/amd64
     build:
       context: .
       dockerfile: docker/backup/Dockerfile
+      platform: linux/amd64
     restart: unless-stopped
     env_file: .env
     environment:
@@ -71,9 +76,11 @@ services:
 
   ui:
     image: powermountain/enshrouded-dedi-ui:latest
+    platform: linux/amd64
     build:
       context: .
       dockerfile: docker/ui/Dockerfile
+      platform: linux/amd64
     restart: unless-stopped
     env_file: .env
     environment:

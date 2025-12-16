@@ -13,6 +13,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/backup /usr/local/bin/backup
-USER 65532
+# Run as root so we can write to the shared /data volume (created by the game container).
+USER root
 EXPOSE 7000
 ENTRYPOINT ["/usr/local/bin/backup"]

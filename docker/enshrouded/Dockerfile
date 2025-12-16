@@ -1,6 +1,5 @@
-FROM debian:bookworm-slim
+FROM --platform=linux/amd64 debian:bookworm-slim
 
-ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN dpkg --add-architecture i386 \
@@ -30,51 +29,32 @@ RUN dpkg --add-architecture i386 \
       iproute2 \
       tini \
       file \
-    && if [ "$TARGETARCH" = "amd64" ]; then \
-         apt-get install -y --no-install-recommends \
-           lib32gcc-s1 \
-           lib32stdc++6 \
-           libcurl4:i386 \
-           libkrb5-3:i386 \
-           libtcmalloc-minimal4:i386 \
-           libdbus-1-3:i386 \
-           wine64 \
-           wine32; \
-       else \
-        apt-get install -y --no-install-recommends \
-          wine64 \
-          libc6:i386 \
-          libstdc++6:i386 \
-          libgcc-s1:i386 \
-          libcurl4:i386 \
-          libkrb5-3:i386 \
-          libtcmalloc-minimal4:i386 \
-          libdbus-1-3:i386 \
-            libbz2-1.0:i386 \
-            libx11-6:i386 \
-            libxext6:i386 \
-            libxrandr2:i386 \
-            libnss3:i386 \
-            libtinfo6:i386 \
-            zlib1g:i386 \
-            libcapstone4:i386 \
-            libnuma1:i386 \
-            liburing2:i386 \
-            libasound2:i386 \
-            qemu-user || true; \
-         apt-get install -y --no-install-recommends box64 || echo "box64 install failed; arm64 remains experimental"; \
-       fi \
+      lib32gcc-s1 \
+      lib32stdc++6 \
+      libcurl4:i386 \
+      libkrb5-3:i386 \
+      libtcmalloc-minimal4:i386 \
+      libdbus-1-3:i386 \
+      wine64 \
+      wine32 \
     && rm -rf /var/lib/apt/lists/*
 
-# SteamCMD
+# SteamCMD (Linux)
 RUN mkdir -p /opt/steamcmd \
     && cd /opt/steamcmd \
     && curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar -xz \
     && chmod +x /opt/steamcmd/steamcmd.sh
 
+# Windows steamcmd (fallback via wine)
+RUN mkdir -p /opt/steamcmd_win \
+    && cd /opt/steamcmd_win \
+    && curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip" -o steamcmd.zip \
+    && unzip steamcmd.zip \
+    && rm -f steamcmd.zip
+
 RUN useradd -m -d /home/steam -s /bin/bash steam \
     && mkdir -p /data \
-    && chown -R steam:steam /data /opt/steamcmd
+    && chown -R steam:steam /data /opt/steamcmd /opt/steamcmd_win
 
 USER steam
 WORKDIR /data

@@ -1,7 +1,7 @@
 # Enshrouded Dedicated Server Stack
 
 One-command Docker Compose stack to run an Enshrouded dedicated server with:
-- Wine-based server container (amd64) with box64+Wine attempt for arm64 (experimental).
+- Wine-based server container (amd64). ARM is no longer supported.
 - Minimal Go admin UI (login-protected) to restart/update, trigger backups, restore, upload saves, and download logs.
 - Backup sidecar with scheduled + manual backups to MinIO (S3-compatible) and retention (14 daily / 8 weekly / 12 monthly by default).
 - MinIO for bundled S3 storage (versioning on, retention ready).
@@ -26,6 +26,7 @@ One-command Docker Compose stack to run an Enshrouded dedicated server with:
 ## Key environment variables
 Copy `.env.example` and adjust:
 - Server: `SERVER_NAME`, `SERVER_PASSWORD` (optional), `MAX_PLAYERS`, `GAME_PORT`, `QUERY_PORT`, `SAVE_DIR`, `TZ`, `UPDATE_ON_START` (true/false).
+- Steam download: default is anonymous. If you see `Failed to install app '2278520' (No subscription)` or Steam Guard prompts, use the UI “Steam Login” form (admin only) to save your Steam credentials (and Guard code) to the shared volume, then restart the server from the UI. You can also set `STEAM_USERNAME`/`STEAM_PASSWORD`/`STEAM_GUARD_CODE` in `.env` if you prefer.
 - UI: `UI_ADMIN_USERNAME`, `UI_ADMIN_PASSWORD`, `UI_SESSION_SECRET` (long random), `STACK_NAME`.
 - Backup: `BACKUP_INTERVAL_HOURS` (default 24), `BACKUP_RETENTION_DAILIES`/`WEEKLIES`/`MONTHLIES`, `BACKUP_SAVE_DIR`, `BACKUP_BIND_ADDR`, `ENSHROUDED_CONTAINER_NAME` (default `enshrouded`), S3 settings (`BACKUP_S3_*`).
 - MinIO: `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET` (default `enshrouded-backups`), `MINIO_RETENTION_DAYS` (for bucket ILM), `MINIO_REGION`.
@@ -51,13 +52,8 @@ Copy `.env.example` and adjust:
 - `minio_data`: MinIO data.
 - To migrate to a new host: stop the stack, copy volumes (or MinIO bucket), start on the new host with the same `.env`.
 
-## ARM64 status (experimental)
-- Easiest path: run the amd64 container on arm64 using binfmt/qemu.
-  1) Install binfmt handlers once on the host: `docker run --privileged --rm tonistiigi/binfmt --install amd64,386`.
-  2) Start with the override: `docker compose -f docker-compose.yml -f docker-compose.arm64.yml up -d`.
-- Native arm64 with box64+Wine is still experimental; if you stick to native mode and the server fails:
-  - Check logs from `enshrouded` and `backup` (`docker compose logs enshrouded backup`).
-  - Verify binfmt/qemu support on the host; expect slower startup and possible incompatibilities. Fallback to the amd64 override above for production use.
+## Platform support
+- AMD64 only (`linux/amd64`). Build and run on an x86_64 host (or via Docker Desktop’s amd64 emulation if you just need to build on an ARM Mac). ARM images and box64/qemu shims have been removed due to instability.
 
 ## Running multiple stacks on one host
 - Change `GAME_PORT`/`QUERY_PORT` (and host port mappings) per stack.

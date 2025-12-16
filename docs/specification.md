@@ -1,6 +1,6 @@
 
 
-# Enshrouded Dedicated Server Stack (Multi-Arch) — Specification
+# Enshrouded Dedicated Server Stack (AMD64) — Specification
 
 ## 1. Project summary
 
@@ -16,7 +16,7 @@ Container registry: Docker Hub org `powermountain` (multi-arch builds run on Doc
 
 ### 2.1 Core goals
 
-1. **Multi-arch images** (linux/amd64 and linux/arm64) for the stack.
+1. **AMD64-only images** (`linux/amd64`) for the stack.
 2. **Game server auto-update on startup** using SteamCMD (`app_update 2278520 validate`).
 3. **Compose-first configuration**: all config via environment variables in `docker-compose.yml` / `.env`.
 4. **Status/admin web UI**:
@@ -41,17 +41,9 @@ Container registry: Docker Hub org `powermountain` (multi-arch builds run on Doc
 
 ## 4. Constraints and risk notes
 
-### 4.1 ARM64 reality
+### 4.1 Platform scope
 
-Enshrouded dedicated server is distributed as a Windows binary and commonly run on Linux via Wine/Proton.
-
-For ARM64 hosts (e.g., Raspberry Pi 5), the stack **must attempt** to run the game server using:
-- `box64` (and `box86` if needed) to execute x86_64 userland where required
-- Wine/Proton for Windows compatibility
-
-Because this is inherently less standard than amd64, the project must:
-- Implement **health checks** and **clear error logs** when the server cannot start.
-- Document “ARM64 support status” clearly in the README (tested/experimental) and include a “Known Issues” section.
+The stack is **AMD64-only** (`linux/amd64`). ARM64 and box64/Proton shims have been removed due to instability. Running on ARM would require host-level emulation (e.g., qemu/binfmt) outside this project’s scope.
 
 ## 5. Architecture overview
 
@@ -218,10 +210,9 @@ suggested top-level structure:
 
 ## 8. Docker build requirements
 
-### 8.1 Multi-arch builds
+### 8.1 Builds
 
-- All images must support `linux/amd64` and `linux/arm64`.
-- Use `buildx`-compatible Dockerfiles.
+- Images target `linux/amd64` only. Buildx is optional.
 
 ### 8.2 Base images
 
@@ -231,8 +222,7 @@ suggested top-level structure:
 ### 8.3 Enshrouded image specifics
 
 - Include SteamCMD in the image or install it at runtime.
-- For Proton, include required runtime components; if Proton distribution is heavy, allow optional download/caching.
-- For ARM64, include `box64` (and optionally `box86`), plus required libs.
+- Include Wine (64/32-bit) to run the Windows server binary.
 
 ## 9. Docker Compose requirements
 
