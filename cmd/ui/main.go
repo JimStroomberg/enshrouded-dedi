@@ -134,14 +134,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := map[string]interface{}{
-		"StackName": s.cfg.StackName,
+		"StackName":  s.cfg.StackName,
 		"ServerName": s.cfg.ServerName,
-		"LogoURL":   s.cfg.LogoURL,
+		"LogoURL":    s.cfg.LogoURL,
 		"SteamState": st,
-		"Status":    status,
-		"Backups":   backups,
-		"LoggedIn":  loggedIn,
-		"Message":   r.URL.Query().Get("msg"),
+		"Status":     status,
+		"Backups":    backups,
+		"LoggedIn":   loggedIn,
+		"Message":    r.URL.Query().Get("msg"),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

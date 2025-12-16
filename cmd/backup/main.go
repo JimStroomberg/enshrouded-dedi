@@ -370,9 +370,9 @@ func (s *BackupService) writeSteamAnonymous() error {
 }
 
 type steamState struct {
-	Mode      string `json:"mode"`                // anonymous | user | unset
-	Username  string `json:"username"`            // optional
-	HasCreds  bool   `json:"has_creds"`           // true if username/password present
+	Mode      string `json:"mode"`      // anonymous | user | unset
+	Username  string `json:"username"`  // optional
+	HasCreds  bool   `json:"has_creds"` // true if username/password present
 	GuardHint bool   `json:"guard_hint"`
 	Chosen    bool   `json:"chosen"`
 	LastError string `json:"last_error,omitempty"`
