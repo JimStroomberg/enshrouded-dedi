@@ -791,7 +791,7 @@ const pageTemplate = `<!doctype html>
     </div>
     {{ end }}
 
-    <!-- Steam Authentication (always visible; actions still require login) -->
+    {{ if .LoggedIn }}
     <div class="card" style="margin-top:14px;">
       <div class="title">Steam Authentication</div>
       {{ if .SteamState }}
@@ -807,7 +807,6 @@ const pageTemplate = `<!doctype html>
           </div>
         </div>
       {{ end }}
-      {{ if .LoggedIn }}
       <form id="steam-mode-form" action="/action/steam-auth" method="post" style="margin-top:10px;">
         <div class="stack" style="margin-bottom:10px;">
           <label class="mode-toggle">
@@ -852,10 +851,8 @@ const pageTemplate = `<!doctype html>
           });
         })();
       </script>
-      {{ else }}
-        <div class="pill status-pill warn">Login to change Steam authentication mode.</div>
-      {{ end }}
     </div>
+    {{ end }}
   </div>
 </body>
 </html>`
