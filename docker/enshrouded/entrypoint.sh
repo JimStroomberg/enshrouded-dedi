@@ -11,6 +11,7 @@ RATE_LIMIT_FILE="/data/steam_rate_limit.lock"
 STEAM_HOME="/data/steamcmd-home"
 WINE_BIN="/usr/bin/wine"
 STEAM_AUTH_FILE="/data/steam_auth.env"
+SERVER_CONFIG_JSON="$SERVER_DIR/enshrouded_server.json"
 if [ ! -x "$WINE_BIN" ] && [ -x "/usr/bin/wine64" ]; then
   WINE_BIN="/usr/bin/wine64"
 fi
@@ -172,6 +173,50 @@ SAVE_DIR=${SAVE_DIR:-/data/savegame}
 CONFIG
 }
 
+sync_json_config() {
+  if [ ! -f "$SERVER_CONFIG_JSON" ]; then
+    echo "[enshrouded] server config $SERVER_CONFIG_JSON not found; skipping json sync."
+    return
+  fi
+  python3 - "$SERVER_CONFIG_JSON" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+name = os.getenv("SERVER_NAME") or "Enshrouded Server"
+save_dir = os.getenv("SAVE_DIR") or "/data/savegame"
+query_port = os.getenv("QUERY_PORT") or "15637"
+max_players = os.getenv("MAX_PLAYERS") or "16"
+password = os.getenv("SERVER_PASSWORD", "")
+
+data["name"] = name
+data["saveDirectory"] = save_dir
+try:
+    data["queryPort"] = int(query_port)
+except ValueError:
+    pass
+try:
+    data["slotCount"] = int(max_players)
+except ValueError:
+    pass
+
+if password:
+    groups = data.get("userGroups")
+    if isinstance(groups, list):
+        for group in groups:
+            if isinstance(group, dict) and group.get("name") == "Friend":
+                group["password"] = password
+                break
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+PY
+}
+
 run_server() {
   local bin="$SERVER_DIR/enshrouded_server.exe"
   if [ ! -f "$bin" ]; then
@@ -191,5 +236,6 @@ if [ "${UPDATE_ON_START:-true}" = "true" ]; then
   update_server
 fi
 
+sync_json_config
 generate_config
 run_server

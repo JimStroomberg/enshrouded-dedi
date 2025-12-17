@@ -535,18 +535,41 @@ func queryA2S(addr string, timeout time.Duration) (*a2sInfo, error) {
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	payload := append([]byte{0xFF, 0xFF, 0xFF, 0xFF}, []byte("TSource Engine Query\x00")...)
-	if _, err := conn.Write(payload); err != nil {
-		return nil, err
-	}
 	buf := make([]byte, 1400)
-	n, err := conn.Read(buf)
+
+	readResp := func(msg []byte) ([]byte, error) {
+		if _, err := conn.Write(msg); err != nil {
+			return nil, err
+		}
+		n, err := conn.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		if n < 5 {
+			return nil, fmt.Errorf("short A2S response")
+		}
+		return buf[:n], nil
+	}
+
+	resp, err := readResp(payload)
 	if err != nil {
 		return nil, err
 	}
-	if n < 5 || buf[4] != 'I' {
+	if resp[4] == 'A' {
+		if len(resp) < 9 {
+			return nil, fmt.Errorf("short A2S challenge")
+		}
+		challenge := append([]byte{}, resp[5:9]...)
+		payloadChallenge := append(append([]byte{}, payload...), challenge...)
+		resp, err = readResp(payloadChallenge)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resp[4] != 'I' {
 		return nil, fmt.Errorf("invalid A2S response")
 	}
-	data := buf[5:n]
+	data := resp[5:]
 	off := 0
 	if len(data) < 1 {
 		return nil, fmt.Errorf("short A2S response")

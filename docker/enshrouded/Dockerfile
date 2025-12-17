@@ -27,6 +27,7 @@ RUN dpkg --add-architecture i386 \
       unzip \
       procps \
       iproute2 \
+      python3 \
       tini \
       file \
       lib32gcc-s1 \

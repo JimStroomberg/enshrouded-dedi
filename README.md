@@ -25,7 +25,7 @@ One-command Docker Compose stack to run an Enshrouded dedicated server with:
 
 ## Key environment variables
 Copy `.env.example` and adjust:
-- Server: `SERVER_NAME`, `SERVER_PASSWORD` (optional), `MAX_PLAYERS`, `GAME_PORT`, `QUERY_PORT`, `SAVE_DIR`, `TZ`, `UPDATE_ON_START` (true/false).
+- Server: `SERVER_NAME`, `SERVER_PASSWORD` (optional; mapped to the `Friend` group password in `enshrouded_server.json`), `MAX_PLAYERS`, `GAME_PORT`, `QUERY_PORT`, `SAVE_DIR`, `TZ`, `UPDATE_ON_START` (true/false).
 - Steam download: default is anonymous. If you see `Failed to install app '2278520' (No subscription)` or Steam Guard prompts, use the UI “Steam Login” form (admin only) to save your Steam credentials (and Guard code) to the shared volume, then restart the server from the UI. You can also set `STEAM_USERNAME`/`STEAM_PASSWORD`/`STEAM_GUARD_CODE` in `.env` if you prefer.
 - UI: `UI_ADMIN_USERNAME`, `UI_ADMIN_PASSWORD`, `UI_SESSION_SECRET` (long random), `STACK_NAME`.
 - Backup: `BACKUP_INTERVAL_HOURS` (default 24), `BACKUP_RETENTION_DAILIES`/`WEEKLIES`/`MONTHLIES`, `BACKUP_SAVE_DIR`, `BACKUP_BIND_ADDR`, `ENSHROUDED_CONTAINER_NAME` (default `enshrouded`), S3 settings (`BACKUP_S3_*`).
