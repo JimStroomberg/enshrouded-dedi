@@ -146,6 +146,7 @@ func main() {
 	r.HandleFunc("/action/upload", srv.requireAuth(srv.handleActionUpload)).Methods(http.MethodPost)
 	r.HandleFunc("/action/steam-auth", srv.requireAuth(srv.handleActionSteamAuth)).Methods(http.MethodPost)
 	r.HandleFunc("/action/steam-anon", srv.requireAuth(srv.handleActionSteamAnon)).Methods(http.MethodPost)
+	r.HandleFunc("/action/groups", srv.requireAuth(srv.handleActionGroupPasswords)).Methods(http.MethodPost)
 
 	r.HandleFunc("/api/status", srv.handleAPIStatus).Methods(http.MethodGet)
 
@@ -466,6 +467,34 @@ func (s *Server) handleActionSteamAnon(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/?msg=Switched+to+anonymous;+server+restarting", http.StatusSeeOther)
 }
 
+func (s *Server) handleActionGroupPasswords(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/?msg=Invalid+request", http.StatusSeeOther)
+		return
+	}
+	payload := map[string]string{}
+	addField := func(key, val string) {
+		v := strings.TrimSpace(val)
+		if v == "" {
+			return
+		}
+		payload[key] = v
+	}
+	addField("admin", r.FormValue("group_admin"))
+	addField("friend", r.FormValue("group_friend"))
+	addField("guest", r.FormValue("group_guest"))
+	addField("visitor", r.FormValue("group_visitor"))
+	if len(payload) == 0 {
+		http.Redirect(w, r, "/?msg=No+group+passwords+provided", http.StatusSeeOther)
+		return
+	}
+	if err := s.triggerPOST("/server/groups", payload); err != nil {
+		http.Redirect(w, r, "/?msg=Group+update+failed", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/?msg=Group+passwords+updated;+server+restarting", http.StatusSeeOther)
+}
+
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		session, _ := s.store.Get(r, "enshrouded-ui")
@@ -713,6 +742,8 @@ const pageTemplate = `<!doctype html>
     .mode-toggle input { margin: 0; }
     .status-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; border:1px solid var(--border); background: rgba(255,255,255,0.04); }
     .status-pill.warn { border-color:#f97316; color:#f97316; }
+    .howto { margin: 0; padding-left: 18px; color: var(--muted); }
+    .howto li { margin-bottom: 6px; }
   </style>
 </head>
 <body>
@@ -793,6 +824,30 @@ const pageTemplate = `<!doctype html>
         <input type="file" name="file" required />
         <button type="submit">Upload + Restore</button>
       </form>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Savegame Import / Export</div>
+      <ul class="howto">
+        <li>Export: click <strong>Backup Now</strong> (or wait for the schedule). Backups are stored in the S3/MinIO bucket.</li>
+        <li>Download: use the MinIO console (port 9001) or any S3 client with your bucket credentials.</li>
+        <li>Import: upload a <code>.tar.gz</code> of your savegame folder (files at archive root). The server stops, restores, and restarts.</li>
+        <li>Tip: take a fresh backup before restore and avoid restores while players are online.</li>
+      </ul>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Access Groups</div>
+      <form action="/action/groups" method="post">
+        <input type="password" name="group_admin" placeholder="Admin group password (optional)" />
+        <input type="password" name="group_friend" placeholder="Friend group password (recommended)" />
+        <input type="password" name="group_guest" placeholder="Guest group password (optional)" />
+        <input type="password" name="group_visitor" placeholder="Visitor group password (optional)" />
+        <button type="submit">Save + Restart</button>
+      </form>
+      <div class="pill" style="margin-top:6px;">
+        Leave fields blank to keep them unchanged. Players typically join with the Friend group password.
+      </div>
     </div>
 
     <div class="card">

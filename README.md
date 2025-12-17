@@ -41,6 +41,7 @@ Copy `.env.example` and adjust:
   - Restore a selected backup.
   - Upload a save archive (tar.gz) → restore.
   - Download latest logs.
+  - Update server access group passwords (Admin/Friend/Guest/Visitor).
 
 ## Backups & retention
 - Scheduled backup every `BACKUP_INTERVAL_HOURS` (24 by default) plus manual trigger.

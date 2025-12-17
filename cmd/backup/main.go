@@ -131,6 +131,7 @@ func main() {
 	r.HandleFunc("/logs", svc.handleLogs).Methods(http.MethodGet)
 	r.HandleFunc("/server/restart", svc.handleRestartServer).Methods(http.MethodPost)
 	r.HandleFunc("/server/update", svc.handleUpdateServer).Methods(http.MethodPost)
+	r.HandleFunc("/server/groups", svc.handleUpdateGroupPasswords).Methods(http.MethodPost)
 	r.HandleFunc("/status", svc.handleStatus).Methods(http.MethodGet)
 	r.HandleFunc("/steam/auth", svc.handleSteamAuth).Methods(http.MethodPost)
 	r.HandleFunc("/steam/anonymous", svc.handleSteamAnonymous).Methods(http.MethodPost)
@@ -276,6 +277,53 @@ func (s *BackupService) handleUpdateServer(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	respondJSON(w, map[string]string{"status": "update-triggered"})
+}
+
+func (s *BackupService) handleUpdateGroupPasswords(w http.ResponseWriter, r *http.Request) {
+	type payload struct {
+		Admin   *string `json:"admin"`
+		Friend  *string `json:"friend"`
+		Guest   *string `json:"guest"`
+		Visitor *string `json:"visitor"`
+	}
+	var p payload
+	if err := decodeJSON(r, &p); err != nil {
+		respondError(w, http.StatusBadRequest, fmt.Errorf("invalid payload: %w", err))
+		return
+	}
+	updates := map[string]string{}
+	addUpdate := func(key string, val *string) {
+		if val == nil {
+			return
+		}
+		v := strings.TrimSpace(*val)
+		if v == "" {
+			return
+		}
+		updates[key] = v
+	}
+	addUpdate("admin", p.Admin)
+	addUpdate("friend", p.Friend)
+	addUpdate("guest", p.Guest)
+	addUpdate("visitor", p.Visitor)
+	if len(updates) == 0 {
+		respondError(w, http.StatusBadRequest, errors.New("no group passwords provided"))
+		return
+	}
+
+	if err := s.stopContainer(r.Context()); err != nil {
+		s.logger.Printf("warn: stop container: %v", err)
+	}
+	if err := s.updateGroupPasswords(updates); err != nil {
+		_ = s.startContainer(r.Context())
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.startContainer(r.Context()); err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSON(w, map[string]string{"status": "updated"})
 }
 
 func (s *BackupService) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -804,6 +852,65 @@ func extractArchive(r io.Reader, dest string) error {
 
 func (s *BackupService) ensureSaveDir() error {
 	return os.MkdirAll(s.cfg.SaveDir, 0o755)
+}
+
+func (s *BackupService) updateGroupPasswords(updates map[string]string) error {
+	cfgPath := filepath.Clean(filepath.Join(s.cfg.SaveDir, "..", "server", "enshrouded_server.json"))
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	groups, ok := doc["userGroups"].([]interface{})
+	if !ok {
+		return errors.New("userGroups not found in server config")
+	}
+	updated := 0
+	for _, g := range groups {
+		group, ok := g.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := group["name"].(string)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if val, ok := updates[key]; ok {
+			group["password"] = val
+			updated++
+		}
+	}
+	if updated == 0 {
+		return errors.New("no matching groups found to update")
+	}
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(cfgPath), "enshrouded-server-*.json")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(out); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chown(1000, 1000); err != nil {
+		// Best-effort; continue even if chown fails.
+		s.logger.Printf("warn: chown server config: %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), cfgPath)
 }
 
 func respondError(w http.ResponseWriter, status int, err error) {
