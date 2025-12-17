@@ -42,12 +42,14 @@ Copy `.env.example` and adjust:
   - Upload a save archive (tar.gz) → restore.
   - Download latest logs.
   - Update server access group passwords (Admin/Friend/Guest/Visitor).
+  - Download backup archives and preview contents before restore.
 
 ## Backups & retention
 - Scheduled backup every `BACKUP_INTERVAL_HOURS` (24 by default) plus manual trigger.
 - Stored in MinIO bucket `enshrouded-backups` (configurable) with versioning on.
 - Retention: keep last 14 daily, 8 weekly, 12 monthly backups (configurable). Extra backups are pruned after each new backup.
 - Restore flow stops the game container, restores files, then restarts.
+- Upload/restore accepts `.tar.gz` and `.zip` archives; contents should be at the archive root.
 
 ## Data persistence
 - `enshrouded_data`: game install, configs, savegames, logs.

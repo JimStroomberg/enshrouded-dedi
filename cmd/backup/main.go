@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"compress/gzip"
 	"context"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -67,6 +69,15 @@ func parseBoolEnv(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+func parseBoolValue(val string) bool {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // BackupService implements backup/restore endpoints.
@@ -125,6 +136,8 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/health", svc.handleHealth).Methods(http.MethodGet)
 	r.HandleFunc("/backups", svc.handleListBackups).Methods(http.MethodGet)
+	r.HandleFunc("/backups/download", svc.handleDownloadBackup).Methods(http.MethodGet)
+	r.HandleFunc("/backups/contents", svc.handleBackupContents).Methods(http.MethodGet)
 	r.HandleFunc("/backup", svc.handleCreateBackup).Methods(http.MethodPost)
 	r.HandleFunc("/restore", svc.handleRestoreBackup).Methods(http.MethodPost)
 	r.HandleFunc("/upload", svc.handleUploadRestore).Methods(http.MethodPost)
@@ -169,6 +182,55 @@ func (s *BackupService) handleListBackups(w http.ResponseWriter, r *http.Request
 	respondJSON(w, items)
 }
 
+func (s *BackupService) handleDownloadBackup(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if !isSafeBackupName(name) {
+		respondError(w, http.StatusBadRequest, errors.New("invalid backup name"))
+		return
+	}
+	obj, err := s.s3.GetObject(r.Context(), s.cfg.Bucket, name, minio.GetObjectOptions{})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer obj.Close()
+	stat, err := obj.Stat()
+	if err != nil {
+		respondError(w, http.StatusNotFound, err)
+		return
+	}
+	contentType := "application/octet-stream"
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") {
+		contentType = "application/gzip"
+	} else if strings.HasSuffix(lower, ".zip") {
+		contentType = "application/zip"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(name)))
+	w.Header().Set("Content-Length", strconv.FormatInt(stat.Size, 10))
+	if _, err := io.Copy(w, obj); err != nil {
+		s.logger.Printf("download error for %s: %v", name, err)
+	}
+}
+
+func (s *BackupService) handleBackupContents(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if !isSafeBackupName(name) {
+		respondError(w, http.StatusBadRequest, errors.New("invalid backup name"))
+		return
+	}
+	items, err := s.listBackupContents(r.Context(), name)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSON(w, map[string]interface{}{
+		"name":  name,
+		"items": items,
+	})
+}
+
 func (s *BackupService) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name, err := s.createBackup(ctx)
@@ -182,14 +244,15 @@ func (s *BackupService) handleCreateBackup(w http.ResponseWriter, r *http.Reques
 func (s *BackupService) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	type payload struct {
-		Name string `json:"name"`
+		Name         string `json:"name"`
+		BackupBefore bool   `json:"backup_before"`
 	}
 	var p payload
 	if err := decodeJSON(r, &p); err != nil || p.Name == "" {
 		respondError(w, http.StatusBadRequest, errors.New("name required"))
 		return
 	}
-	if err := s.restoreBackup(ctx, p.Name); err != nil {
+	if err := s.restoreBackup(ctx, p.Name, p.BackupBefore); err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -203,13 +266,14 @@ func (s *BackupService) handleUploadRestore(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusBadRequest, fmt.Errorf("invalid upload: %w", err))
 		return
 	}
+	backupBefore := parseBoolValue(r.FormValue("backup_before"))
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		respondError(w, http.StatusBadRequest, errors.New("file field required"))
 		return
 	}
 	defer file.Close()
-	if err := s.uploadAndRestore(ctx, header.Filename, file); err != nil {
+	if err := s.uploadAndRestore(ctx, header.Filename, file, backupBefore); err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -510,6 +574,27 @@ func (s *BackupService) listBackups(ctx context.Context) ([]minio.ObjectInfo, er
 	return items, nil
 }
 
+func (s *BackupService) listBackupContents(ctx context.Context, name string) ([]string, error) {
+	obj, err := s.s3.GetObject(ctx, s.cfg.Bucket, name, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer obj.Close()
+	if _, err := obj.Stat(); err != nil {
+		return nil, err
+	}
+	tmpFile, err := os.CreateTemp("", "enshrouded-contents-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+	if _, err := io.Copy(tmpFile, obj); err != nil {
+		return nil, err
+	}
+	return listArchiveContents(tmpFile.Name(), 200)
+}
+
 func (s *BackupService) createBackup(ctx context.Context) (string, error) {
 	ts := time.Now().UTC().Format("20060102-150405")
 	name := fmt.Sprintf("backup-%s.tar.gz", ts)
@@ -552,13 +637,19 @@ func (s *BackupService) createBackup(ctx context.Context) (string, error) {
 	return name, nil
 }
 
-func (s *BackupService) restoreBackup(ctx context.Context, name string) error {
+func (s *BackupService) restoreBackup(ctx context.Context, name string, backupBefore bool) error {
 	if name == "" {
 		return errors.New("backup name required")
 	}
 
 	if err := s.stopContainer(ctx); err != nil {
 		s.logger.Printf("warn: stop container: %v", err)
+	}
+	if backupBefore {
+		if _, err := s.createBackup(ctx); err != nil {
+			_ = s.startContainer(ctx)
+			return err
+		}
 	}
 
 	tmpFile, err := os.CreateTemp("", "enshrouded-restore-*.tar.gz")
@@ -581,7 +672,7 @@ func (s *BackupService) restoreBackup(ctx context.Context, name string) error {
 		return err
 	}
 
-	if err := extractArchive(tmpFile, s.cfg.SaveDir); err != nil {
+	if err := extractArchive(tmpFile.Name(), s.cfg.SaveDir); err != nil {
 		return err
 	}
 
@@ -591,7 +682,7 @@ func (s *BackupService) restoreBackup(ctx context.Context, name string) error {
 	return nil
 }
 
-func (s *BackupService) uploadAndRestore(ctx context.Context, filename string, r io.Reader) error {
+func (s *BackupService) uploadAndRestore(ctx context.Context, filename string, r io.Reader, backupBefore bool) error {
 	tmpFile, err := os.CreateTemp("", "enshrouded-upload-*.tar")
 	if err != nil {
 		return err
@@ -609,7 +700,13 @@ func (s *BackupService) uploadAndRestore(ctx context.Context, filename string, r
 	if err := s.stopContainer(ctx); err != nil {
 		s.logger.Printf("warn: stop container: %v", err)
 	}
-	if err := extractArchive(tmpFile, s.cfg.SaveDir); err != nil {
+	if backupBefore {
+		if _, err := s.createBackup(ctx); err != nil {
+			_ = s.startContainer(ctx)
+			return err
+		}
+	}
+	if err := extractArchive(tmpFile.Name(), s.cfg.SaveDir); err != nil {
 		return err
 	}
 	return s.startContainer(ctx)
@@ -753,6 +850,20 @@ func parseTimestamp(name string) (time.Time, error) {
 	return time.Parse("20060102-150405", stamp)
 }
 
+func isSafeBackupName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return false
+	}
+	lower := strings.ToLower(name)
+	if !(strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".zip")) {
+		return false
+	}
+	return filepath.Base(name) == name
+}
+
 func archiveDir(root string, w io.Writer) error {
 	gz := gzip.NewWriter(w)
 	defer gz.Close()
@@ -793,7 +904,54 @@ func archiveDir(root string, w io.Writer) error {
 	})
 }
 
-func extractArchive(r io.Reader, dest string) error {
+type archiveFormat int
+
+const (
+	archiveUnknown archiveFormat = iota
+	archiveTarGz
+	archiveZip
+)
+
+func extractArchive(path, dest string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	format, err := detectArchiveFormat(f)
+	if err != nil {
+		return err
+	}
+	switch format {
+	case archiveTarGz:
+		return extractTarGz(f, dest)
+	case archiveZip:
+		return extractZip(f, dest)
+	default:
+		return errors.New("unsupported archive format")
+	}
+}
+
+func detectArchiveFormat(f *os.File) (archiveFormat, error) {
+	header := make([]byte, 4)
+	n, err := f.Read(header)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return archiveUnknown, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return archiveUnknown, err
+	}
+	if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
+		return archiveTarGz, nil
+	}
+	if n >= 4 && header[0] == 'P' && header[1] == 'K' {
+		return archiveZip, nil
+	}
+	return archiveUnknown, nil
+}
+
+func extractTarGz(r io.Reader, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
@@ -816,7 +974,11 @@ func extractArchive(r io.Reader, dest string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(dest, hdr.Name)
+		name, ok := cleanArchivePath(hdr.Name)
+		if !ok {
+			return fmt.Errorf("invalid path in archive: %s", hdr.Name)
+		}
+		target := filepath.Join(dest, name)
 		absTarget, err := filepath.Abs(target)
 		if err != nil {
 			return err
@@ -848,6 +1010,161 @@ func extractArchive(r io.Reader, dest string) error {
 		}
 	}
 	return nil
+}
+
+func extractZip(f *os.File, dest string) error {
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	stat, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	zr, err := zip.NewReader(f, stat.Size())
+	if err != nil {
+		return err
+	}
+	base, err := filepath.Abs(dest)
+	if err != nil {
+		return err
+	}
+	for _, zf := range zr.File {
+		name, ok := cleanArchivePath(zf.Name)
+		if !ok {
+			return fmt.Errorf("invalid path in archive: %s", zf.Name)
+		}
+		target := filepath.Join(dest, name)
+		absTarget, err := filepath.Abs(target)
+		if err != nil {
+			return err
+		}
+		if !strings.HasPrefix(absTarget, base) {
+			return fmt.Errorf("invalid path in archive: %s", zf.Name)
+		}
+		if zf.FileInfo().IsDir() {
+			if err := os.MkdirAll(absTarget, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(absTarget), 0o755); err != nil {
+			return err
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return err
+		}
+		fh, err := os.OpenFile(absTarget, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, zf.Mode())
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		if _, err := io.Copy(fh, rc); err != nil {
+			fh.Close()
+			rc.Close()
+			return err
+		}
+		fh.Close()
+		rc.Close()
+	}
+	return nil
+}
+
+func listArchiveContents(path string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	format, err := detectArchiveFormat(f)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case archiveTarGz:
+		return listTarGzContents(f, limit)
+	case archiveZip:
+		return listZipContents(f, limit)
+	default:
+		return nil, errors.New("unsupported archive format")
+	}
+}
+
+func listTarGzContents(r io.Reader, limit int) ([]string, error) {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	var items []string
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		name, ok := cleanArchivePath(hdr.Name)
+		if !ok {
+			continue
+		}
+		items = append(items, name)
+		if len(items) >= limit {
+			break
+		}
+	}
+	return items, nil
+}
+
+func listZipContents(f *os.File, limit int) ([]string, error) {
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	zr, err := zip.NewReader(f, stat.Size())
+	if err != nil {
+		return nil, err
+	}
+	items := make([]string, 0, min(limit, len(zr.File)))
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		name, ok := cleanArchivePath(zf.Name)
+		if !ok {
+			continue
+		}
+		items = append(items, name)
+		if len(items) >= limit {
+			break
+		}
+	}
+	return items, nil
+}
+
+func cleanArchivePath(name string) (string, bool) {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = path.Clean("/" + name)
+	name = strings.TrimPrefix(name, "/")
+	if name == "" || strings.HasPrefix(name, "..") {
+		return "", false
+	}
+	return name, true
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *BackupService) ensureSaveDir() error {

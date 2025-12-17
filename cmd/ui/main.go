@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -147,6 +148,8 @@ func main() {
 	r.HandleFunc("/action/steam-auth", srv.requireAuth(srv.handleActionSteamAuth)).Methods(http.MethodPost)
 	r.HandleFunc("/action/steam-anon", srv.requireAuth(srv.handleActionSteamAnon)).Methods(http.MethodPost)
 	r.HandleFunc("/action/groups", srv.requireAuth(srv.handleActionGroupPasswords)).Methods(http.MethodPost)
+	r.HandleFunc("/backup/download", srv.requireAuth(srv.handleDownloadBackup)).Methods(http.MethodGet)
+	r.HandleFunc("/backup/contents", srv.requireAuth(srv.handleBackupContents)).Methods(http.MethodGet)
 
 	r.HandleFunc("/api/status", srv.handleAPIStatus).Methods(http.MethodGet)
 
@@ -244,6 +247,54 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
+func (s *Server) handleDownloadBackup(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		http.Error(w, "backup name required", http.StatusBadRequest)
+		return
+	}
+	url := fmt.Sprintf("%s/backups/download?name=%s", strings.TrimRight(s.cfg.BackupAPI, "/"), url.QueryEscape(name))
+	resp, err := s.client.Get(url)
+	if err != nil {
+		http.Error(w, "failed to fetch backup", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		http.Error(w, "backup download error", http.StatusBadGateway)
+		return
+	}
+	for k, v := range resp.Header {
+		if len(v) > 0 && (strings.EqualFold(k, "Content-Type") || strings.EqualFold(k, "Content-Disposition") || strings.EqualFold(k, "Content-Length")) {
+			w.Header().Set(k, v[0])
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleBackupContents(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		http.Error(w, "backup name required", http.StatusBadRequest)
+		return
+	}
+	url := fmt.Sprintf("%s/backups/contents?name=%s", strings.TrimRight(s.cfg.BackupAPI, "/"), url.QueryEscape(name))
+	resp, err := s.client.Get(url)
+	if err != nil {
+		http.Error(w, "failed to fetch contents", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		http.Error(w, "backup contents error", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
 func (s *Server) handleActionRestart(w http.ResponseWriter, r *http.Request) {
 	if err := s.triggerPOST("/server/restart", nil); err != nil {
 		http.Redirect(w, r, "/?msg=Restart+failed", http.StatusSeeOther)
@@ -278,7 +329,10 @@ func (s *Server) handleActionRestore(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?msg=Backup+name+required", http.StatusSeeOther)
 		return
 	}
-	body := map[string]string{"name": name}
+	body := map[string]interface{}{
+		"name":          name,
+		"backup_before": parseFormBool(r.FormValue("backup_before")),
+	}
 	if err := s.triggerPOST("/restore", body); err != nil {
 		http.Redirect(w, r, "/?msg=Restore+failed", http.StatusSeeOther)
 		return
@@ -292,6 +346,7 @@ func (s *Server) handleActionUpload(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?msg=Upload+error", http.StatusSeeOther)
 		return
 	}
+	backupBefore := parseFormBool(r.FormValue("backup_before"))
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Redirect(w, r, "/?msg=File+required", http.StatusSeeOther)
@@ -306,6 +361,9 @@ func (s *Server) handleActionUpload(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer pw.Close()
 		defer mw.Close()
+		if backupBefore {
+			_ = mw.WriteField("backup_before", "true")
+		}
 		part, err := mw.CreateFormFile("file", filepath.Base(header.Filename))
 		if err != nil {
 			pw.CloseWithError(err)
@@ -520,6 +578,15 @@ func atoiEnv(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func parseFormBool(val string) bool {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func envBool(key string, def bool) bool {
@@ -813,25 +880,69 @@ const pageTemplate = `<!doctype html>
     <div class="card" style="margin-bottom:14px;">
       <div class="title">Restore</div>
       <form action="/action/restore" method="post" class="stack">
-        <select name="name" style="padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+        <select id="restore-select" name="name" style="padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
           {{ range .Backups }}
             <option value="{{ .Key }}">{{ .Key }} ({{ .LastModified.Format "2006-01-02 15:04" }})</option>
           {{ end }}
         </select>
         <button type="submit">Restore</button>
+        <button type="button" id="preview-backup">Preview</button>
+        <label class="mode-toggle">
+          <input type="checkbox" name="backup_before" value="true" checked />
+          <span>Backup before restore</span>
+        </label>
       </form>
+      <div id="backup-contents" class="pill" style="margin-top:8px; display:none; white-space:pre-wrap;"></div>
       <form action="/action/upload" method="post" enctype="multipart/form-data" class="stack" style="margin-top:10px;">
         <input type="file" name="file" required />
+        <label class="mode-toggle">
+          <input type="checkbox" name="backup_before" value="true" checked />
+          <span>Backup before restore</span>
+        </label>
         <button type="submit">Upload + Restore</button>
       </form>
     </div>
+    <script>
+      (function() {
+        const previewBtn = document.getElementById('preview-backup');
+        const select = document.getElementById('restore-select');
+        const output = document.getElementById('backup-contents');
+        if (!previewBtn || !select || !output) return;
+        previewBtn.addEventListener('click', async () => {
+          const name = select.value;
+          if (!name) {
+            output.style.display = 'block';
+            output.textContent = 'No backup selected.';
+            return;
+          }
+          output.style.display = 'block';
+          output.textContent = 'Loading preview...';
+          try {
+            const resp = await fetch('/backup/contents?name=' + encodeURIComponent(name));
+            if (!resp.ok) {
+              output.textContent = 'Preview failed.';
+              return;
+            }
+            const data = await resp.json();
+            const items = Array.isArray(data.items) ? data.items : [];
+            if (!items.length) {
+              output.textContent = 'No files listed.';
+              return;
+            }
+            output.textContent = items.join('\n');
+          } catch (err) {
+            output.textContent = 'Preview failed.';
+          }
+        });
+      })();
+    </script>
 
     <div class="card" style="margin-bottom:14px;">
       <div class="title">Savegame Import / Export</div>
       <ul class="howto">
         <li>Export: click <strong>Backup Now</strong> (or wait for the schedule). Backups are stored in the S3/MinIO bucket.</li>
-        <li>Download: use the MinIO console (port 9001) or any S3 client with your bucket credentials.</li>
-        <li>Import: upload a <code>.tar.gz</code> of your savegame folder (files at archive root). The server stops, restores, and restarts.</li>
+        <li>Download: use the Backups table or the MinIO console (port 9001) with your bucket credentials.</li>
+        <li>Import: upload a <code>.tar.gz</code> or <code>.zip</code> of your savegame folder (files at archive root). The server stops, restores, and restarts.</li>
         <li>Tip: take a fresh backup before restore and avoid restores while players are online.</li>
       </ul>
     </div>
@@ -854,14 +965,19 @@ const pageTemplate = `<!doctype html>
       <div class="title">Backups</div>
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Name</th><th>Size</th><th>Modified</th></tr></thead>
+          <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Download</th></tr></thead>
           <tbody>
           {{ if .Backups }}
             {{ range .Backups }}
-              <tr><td>{{ .Key }}</td><td>{{ formatBytes .Size }}</td><td>{{ .LastModified.Format "2006-01-02 15:04" }}</td></tr>
+              <tr>
+                <td>{{ .Key }}</td>
+                <td>{{ formatBytes .Size }}</td>
+                <td>{{ .LastModified.Format "2006-01-02 15:04" }}</td>
+                <td><a class="ghost" href="/backup/download?name={{ .Key }}">Download</a></td>
+              </tr>
             {{ end }}
           {{ else }}
-            <tr><td colspan="3">No backups yet.</td></tr>
+            <tr><td colspan="4">No backups yet.</td></tr>
           {{ end }}
           </tbody>
         </table>
