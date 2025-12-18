@@ -1086,7 +1086,7 @@ const pageTemplate = `<!doctype html>
           <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
         </div>
         <input type="text" name="tags" placeholder="Tags (comma separated)" value="{{ if .ServerCfg.Tags }}{{ join .ServerCfg.Tags ", " }}{{ end }}" />
-        <div class="grid" style="margin-top:8px;">
+        <div class="grid" style="margin-top:8px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));">
           <div class="card">
             <div class="title">Players</div>
             <label class="mode-toggle" style="justify-content:space-between;">
