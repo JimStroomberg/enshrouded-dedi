@@ -1034,7 +1034,7 @@ const pageTemplate = `<!doctype html>
           <input type="number" name="day_time_minutes" min="1" placeholder="Day duration (minutes)" value="{{ if .ServerCfg.DayTimeMinutes }}{{ .ServerCfg.DayTimeMinutes }}{{ end }}" />
           <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
         </div>
-        <input type="text" name="tags" placeholder="Tags (comma separated)" value="{{ if .ServerCfg.Tags }}{{ join .ServerCfg.Tags \", \" }}{{ end }}" />
+        <input type="text" name="tags" placeholder="Tags (comma separated)" value="{{ if .ServerCfg.Tags }}{{ join .ServerCfg.Tags ", " }}{{ end }}" />
         <button type="submit">Save + Restart</button>
       </form>
       <div class="pill" style="margin-top:6px;">
