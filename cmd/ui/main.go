@@ -981,6 +981,8 @@ const pageTemplate = `<!doctype html>
     .logo { max-height: 54px; object-fit: contain; filter: drop-shadow(0 8px 18px rgba(0,0,0,0.35)); }
     .mode-toggle { display: inline-flex; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); }
     .mode-toggle input { margin: 0; }
+    .mode-toggle span { flex: 1; min-width: 0; }
+    .mode-toggle input[type="number"], .mode-toggle input[type="text"], .mode-toggle select { max-width: 140px; min-width: 110px; }
     .status-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; border:1px solid var(--border); background: rgba(255,255,255,0.04); }
     .status-pill.warn { border-color:#f97316; color:#f97316; }
     .howto { margin: 0; padding-left: 18px; color: var(--muted); }
