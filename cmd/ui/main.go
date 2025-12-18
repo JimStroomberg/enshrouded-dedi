@@ -1080,7 +1080,10 @@ const pageTemplate = `<!doctype html>
           <input type="checkbox" name="enable_text_chat" value="true" {{ if .ServerCfg.EnableTextChat }}checked{{ end }} />
           <span>Enable text chat</span>
         </label>
-        <input type="text" name="game_settings_preset" placeholder="Game settings preset" value="{{ .ServerCfg.GameSettingsPreset }}" />
+        <div class="stack" style="align-items:center; gap:10px; flex-wrap:wrap;">
+          <input type="text" id="preset-field" name="game_settings_preset" placeholder="Game settings preset" value="{{ .ServerCfg.GameSettingsPreset }}" style="max-width:260px;" />
+          <button type="button" id="reset-defaults" class="ghost">Reset to default values</button>
+        </div>
         <div class="stack">
           <input type="number" name="day_time_minutes" min="1" placeholder="Day duration (minutes)" value="{{ if .ServerCfg.DayTimeMinutes }}{{ .ServerCfg.DayTimeMinutes }}{{ end }}" />
           <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
@@ -1285,6 +1288,59 @@ const pageTemplate = `<!doctype html>
             e.preventDefault();
             alert('Group passwords must be unique. Please use different passwords for each group.');
           }
+        });
+      })();
+      (function() {
+        const btn = document.getElementById('reset-defaults');
+        const form = btn ? btn.closest('form') : null;
+        if (!btn || !form) return;
+        const setVal = (name, value) => {
+          const el = form.querySelector('[name="' + name + '"]');
+          if (!el) return;
+          if (el.type === 'checkbox') {
+            el.checked = value === true || value === 'true';
+          } else {
+            el.value = value;
+          }
+        };
+        btn.addEventListener('click', () => {
+          const defaults = {
+            slot_count: 16,
+            voice_chat_mode: 'Proximity',
+            enable_voice_chat: true,
+            enable_text_chat: true,
+            game_settings_preset: 'Default',
+            day_time_minutes: 30,
+            night_time_minutes: 12,
+            gs_playerHealthFactor: '1',
+            gs_playerStaminaFactor: '1',
+            gs_enableDurability: true,
+            gs_enableStarvingDebuff: false,
+            gs_foodBuffDurationFactor: '1',
+            gs_shroudTimeFactor: '1',
+            gs_tombstoneMode: 'AddBackpackMaterials',
+            gs_weatherFrequency: 'Normal',
+            gs_enemyDamageFactor: '1',
+            gs_enemyHealthFactor: '1',
+            gs_enemyPerceptionRangeFactor: '1',
+            gs_randomSpawnerAmount: 'Normal',
+            gs_aggroPoolAmount: 'Normal',
+            gs_pacifyAllEnemies: false,
+            gs_tamingStartleRepercussion: 'LoseSomeProgress',
+            gs_miningDamageFactor: '1',
+            gs_resourceDropStackAmountFactor: '1',
+            gs_plantGrowthSpeedFactor: '1',
+            gs_factoryProductionSpeedFactor: '1',
+            gs_perkUpgradeRecyclingFactor: '0.5',
+            gs_perkCostFactor: '1',
+            gs_experienceCombatFactor: '1',
+            gs_experienceMiningFactor: '1',
+            gs_experienceExplorationQuestsFactor: '1',
+          };
+          Object.keys(defaults).forEach(k => setVal(k, defaults[k]));
+          const preset = form.querySelector('#preset-field');
+          if (preset) preset.value = defaults.game_settings_preset;
+          alert('Default values applied. Click "Save + Restart" to apply.');
         });
       })();
     </script>
