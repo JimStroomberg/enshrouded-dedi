@@ -1087,8 +1087,14 @@ const pageTemplate = `<!doctype html>
         <div class="grid" style="margin-top:8px;">
           <div class="card">
             <div class="title">Players</div>
-            <input type="number" step="0.1" name="gs_playerHealthFactor" placeholder="Health factor" value="{{ index .ServerCfg.GameSettings "playerHealthFactor" }}" />
-            <input type="number" step="0.1" name="gs_playerStaminaFactor" placeholder="Stamina factor" value="{{ index .ServerCfg.GameSettings "playerStaminaFactor" }}" />
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Health factor (playerHealthFactor)</span>
+              <input type="number" step="0.1" name="gs_playerHealthFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "playerHealthFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Stamina factor (playerStaminaFactor)</span>
+              <input type="number" step="0.1" name="gs_playerStaminaFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "playerStaminaFactor" }}" style="max-width:110px;" />
+            </label>
             <label class="mode-toggle">
               <input type="checkbox" name="gs_enableDurability" value="true" {{ if eq (index .ServerCfg.GameSettings "enableDurability") true }}checked{{ end }} />
               <span>Durability enabled</span>
@@ -1097,11 +1103,17 @@ const pageTemplate = `<!doctype html>
               <input type="checkbox" name="gs_enableStarvingDebuff" value="true" {{ if eq (index .ServerCfg.GameSettings "enableStarvingDebuff") true }}checked{{ end }} />
               <span>Starving debuff</span>
             </label>
-            <input type="number" step="0.1" name="gs_foodBuffDurationFactor" placeholder="Food buff duration factor" value="{{ index .ServerCfg.GameSettings "foodBuffDurationFactor" }}" />
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Food buff duration (foodBuffDurationFactor)</span>
+              <input type="number" step="0.1" name="gs_foodBuffDurationFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "foodBuffDurationFactor" }}" style="max-width:110px;" />
+            </label>
           </div>
           <div class="card">
             <div class="title">Survival</div>
-            <input type="number" step="0.1" name="gs_shroudTimeFactor" placeholder="Shroud time factor" value="{{ index .ServerCfg.GameSettings "shroudTimeFactor" }}" />
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Shroud time (shroudTimeFactor)</span>
+              <input type="number" step="0.1" name="gs_shroudTimeFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "shroudTimeFactor" }}" style="max-width:110px;" />
+            </label>
             <select name="gs_tombstoneMode" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
               <option value="">Tombstone mode (no change)</option>
               <option value="AddBackpackMaterials" {{ if eq (index .ServerCfg.GameSettings "tombstoneMode") "AddBackpackMaterials" }}selected{{ end }}>Keep backpack materials</option>
@@ -1116,9 +1128,18 @@ const pageTemplate = `<!doctype html>
           </div>
           <div class="card">
             <div class="title">Enemies</div>
-            <input type="number" step="0.1" name="gs_enemyDamageFactor" placeholder="Enemy damage factor" value="{{ index .ServerCfg.GameSettings "enemyDamageFactor" }}" />
-            <input type="number" step="0.1" name="gs_enemyHealthFactor" placeholder="Enemy health factor" value="{{ index .ServerCfg.GameSettings "enemyHealthFactor" }}" />
-            <input type="number" step="0.1" name="gs_enemyPerceptionRangeFactor" placeholder="Enemy perception range factor" value="{{ index .ServerCfg.GameSettings "enemyPerceptionRangeFactor" }}" />
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Enemy damage (enemyDamageFactor)</span>
+              <input type="number" step="0.1" name="gs_enemyDamageFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyDamageFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Enemy health (enemyHealthFactor)</span>
+              <input type="number" step="0.1" name="gs_enemyHealthFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyHealthFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Enemy perception (enemyPerceptionRangeFactor)</span>
+              <input type="number" step="0.1" name="gs_enemyPerceptionRangeFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyPerceptionRangeFactor" }}" style="max-width:110px;" />
+            </label>
             <select name="gs_randomSpawnerAmount" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
               <option value="">Spawner amount (no change)</option>
               <option value="Low" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "Low" }}selected{{ end }}>Low</option>
@@ -1143,15 +1164,42 @@ const pageTemplate = `<!doctype html>
           </div>
           <div class="card">
             <div class="title">Resources / Progression</div>
-            <input type="number" step="0.1" name="gs_miningDamageFactor" placeholder="Mining damage factor" value="{{ index .ServerCfg.GameSettings "miningDamageFactor" }}" />
-            <input type="number" step="0.1" name="gs_resourceDropStackAmountFactor" placeholder="Resource drop factor" value="{{ index .ServerCfg.GameSettings "resourceDropStackAmountFactor" }}" />
-            <input type="number" step="0.1" name="gs_plantGrowthSpeedFactor" placeholder="Plant growth speed factor" value="{{ index .ServerCfg.GameSettings "plantGrowthSpeedFactor" }}" />
-            <input type="number" step="0.1" name="gs_factoryProductionSpeedFactor" placeholder="Factory production speed factor" value="{{ index .ServerCfg.GameSettings "factoryProductionSpeedFactor" }}" />
-            <input type="number" step="0.1" name="gs_perkUpgradeRecyclingFactor" placeholder="Perk upgrade recycling factor" value="{{ index .ServerCfg.GameSettings "perkUpgradeRecyclingFactor" }}" />
-            <input type="number" step="0.1" name="gs_perkCostFactor" placeholder="Perk cost factor" value="{{ index .ServerCfg.GameSettings "perkCostFactor" }}" />
-            <input type="number" step="0.1" name="gs_experienceCombatFactor" placeholder="Combat XP factor" value="{{ index .ServerCfg.GameSettings "experienceCombatFactor" }}" />
-            <input type="number" step="0.1" name="gs_experienceMiningFactor" placeholder="Mining XP factor" value="{{ index .ServerCfg.GameSettings "experienceMiningFactor" }}" />
-            <input type="number" step="0.1" name="gs_experienceExplorationQuestsFactor" placeholder="Exploration XP factor" value="{{ index .ServerCfg.GameSettings "experienceExplorationQuestsFactor" }}" />
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Mining damage (miningDamageFactor)</span>
+              <input type="number" step="0.1" name="gs_miningDamageFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "miningDamageFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Resource drop (resourceDropStackAmountFactor)</span>
+              <input type="number" step="0.1" name="gs_resourceDropStackAmountFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "resourceDropStackAmountFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Plant growth (plantGrowthSpeedFactor)</span>
+              <input type="number" step="0.1" name="gs_plantGrowthSpeedFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "plantGrowthSpeedFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Factory production (factoryProductionSpeedFactor)</span>
+              <input type="number" step="0.1" name="gs_factoryProductionSpeedFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "factoryProductionSpeedFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Perk recycling (perkUpgradeRecyclingFactor)</span>
+              <input type="number" step="0.1" name="gs_perkUpgradeRecyclingFactor" placeholder="0.5" value="{{ index .ServerCfg.GameSettings "perkUpgradeRecyclingFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Perk cost (perkCostFactor)</span>
+              <input type="number" step="0.1" name="gs_perkCostFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "perkCostFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Combat XP (experienceCombatFactor)</span>
+              <input type="number" step="0.1" name="gs_experienceCombatFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceCombatFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Mining XP (experienceMiningFactor)</span>
+              <input type="number" step="0.1" name="gs_experienceMiningFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceMiningFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Exploration XP (experienceExplorationQuestsFactor)</span>
+              <input type="number" step="0.1" name="gs_experienceExplorationQuestsFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceExplorationQuestsFactor" }}" style="max-width:110px;" />
+            </label>
           </div>
         </div>
         <button type="submit">Save + Restart</button>
