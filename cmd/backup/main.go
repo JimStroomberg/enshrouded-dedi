@@ -484,29 +484,31 @@ func (s *BackupService) handleUpdateGroupPasswords(w http.ResponseWriter, r *htt
 }
 
 type serverConfigView struct {
-	Name               string   `json:"name"`
-	SlotCount          int      `json:"slot_count"`
-	Tags               []string `json:"tags"`
-	VoiceChatMode      string   `json:"voice_chat_mode"`
-	EnableVoiceChat    bool     `json:"enable_voice_chat"`
-	EnableTextChat     bool     `json:"enable_text_chat"`
-	GameSettingsPreset string   `json:"game_settings_preset"`
-	DayTimeMinutes     int      `json:"day_time_minutes"`
-	NightTimeMinutes   int      `json:"night_time_minutes"`
-	ServerPassword     string   `json:"server_password"`
+	Name               string                 `json:"name"`
+	SlotCount          int                    `json:"slot_count"`
+	Tags               []string               `json:"tags"`
+	VoiceChatMode      string                 `json:"voice_chat_mode"`
+	EnableVoiceChat    bool                   `json:"enable_voice_chat"`
+	EnableTextChat     bool                   `json:"enable_text_chat"`
+	GameSettingsPreset string                 `json:"game_settings_preset"`
+	DayTimeMinutes     int                    `json:"day_time_minutes"`
+	NightTimeMinutes   int                    `json:"night_time_minutes"`
+	ServerPassword     string                 `json:"server_password"`
+	GameSettings       map[string]interface{} `json:"game_settings,omitempty"`
 }
 
 type serverConfigPayload struct {
-	Name               *string  `json:"name"`
-	SlotCount          *int     `json:"slot_count"`
-	Tags               []string `json:"tags"`
-	VoiceChatMode      *string  `json:"voice_chat_mode"`
-	EnableVoiceChat    *bool    `json:"enable_voice_chat"`
-	EnableTextChat     *bool    `json:"enable_text_chat"`
-	GameSettingsPreset *string  `json:"game_settings_preset"`
-	DayTimeMinutes     *int     `json:"day_time_minutes"`
-	NightTimeMinutes   *int     `json:"night_time_minutes"`
-	ServerPassword     *string  `json:"server_password"`
+	Name               *string           `json:"name"`
+	SlotCount          *int              `json:"slot_count"`
+	Tags               []string          `json:"tags"`
+	VoiceChatMode      *string           `json:"voice_chat_mode"`
+	EnableVoiceChat    *bool             `json:"enable_voice_chat"`
+	EnableTextChat     *bool             `json:"enable_text_chat"`
+	GameSettingsPreset *string           `json:"game_settings_preset"`
+	DayTimeMinutes     *int              `json:"day_time_minutes"`
+	NightTimeMinutes   *int              `json:"night_time_minutes"`
+	ServerPassword     *string           `json:"server_password"`
+	GameSettings       map[string]string `json:"game_settings"`
 }
 
 func (s *BackupService) handleGetServerConfig(w http.ResponseWriter, r *http.Request) {
@@ -1312,6 +1314,78 @@ func min(a, b int) int {
 	return b
 }
 
+type settingRule struct {
+	kind  string
+	enums []string
+}
+
+var allowedGameSettings = map[string]settingRule{
+	"playerHealthFactor":                {kind: "float"},
+	"playerStaminaFactor":               {kind: "float"},
+	"enableDurability":                  {kind: "bool"},
+	"enableStarvingDebuff":              {kind: "bool"},
+	"foodBuffDurationFactor":            {kind: "float"},
+	"shroudTimeFactor":                  {kind: "float"},
+	"tombstoneMode":                     {kind: "enum", enums: []string{"AddBackpackMaterials", "DropBackpackMaterials"}},
+	"weatherFrequency":                  {kind: "enum", enums: []string{"Low", "Normal", "High"}},
+	"enemyDamageFactor":                 {kind: "float"},
+	"enemyHealthFactor":                 {kind: "float"},
+	"enemyPerceptionRangeFactor":        {kind: "float"},
+	"bossDamageFactor":                  {kind: "float"},
+	"bossHealthFactor":                  {kind: "float"},
+	"randomSpawnerAmount":               {kind: "enum", enums: []string{"Low", "Normal", "High"}},
+	"aggroPoolAmount":                   {kind: "enum", enums: []string{"Low", "Normal", "High"}},
+	"pacifyAllEnemies":                  {kind: "bool"},
+	"tamingStartleRepercussion":         {kind: "enum", enums: []string{"LoseSomeProgress", "LoseAllProgress"}},
+	"miningDamageFactor":                {kind: "float"},
+	"resourceDropStackAmountFactor":     {kind: "float"},
+	"plantGrowthSpeedFactor":            {kind: "float"},
+	"factoryProductionSpeedFactor":      {kind: "float"},
+	"perkUpgradeRecyclingFactor":        {kind: "float"},
+	"perkCostFactor":                    {kind: "float"},
+	"experienceCombatFactor":            {kind: "float"},
+	"experienceMiningFactor":            {kind: "float"},
+	"experienceExplorationQuestsFactor": {kind: "float"},
+}
+
+func applyGameSetting(gs map[string]interface{}, key, raw string) error {
+	rule, ok := allowedGameSettings[key]
+	if !ok {
+		return fmt.Errorf("setting not allowed")
+	}
+	switch rule.kind {
+	case "float":
+		if raw == "" {
+			return nil
+		}
+		val, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return err
+		}
+		gs[key] = val
+	case "bool":
+		gs[key] = parseBoolValue(raw)
+	case "enum":
+		if raw == "" {
+			return nil
+		}
+		okVal := false
+		for _, ev := range rule.enums {
+			if raw == ev {
+				okVal = true
+				break
+			}
+		}
+		if !okVal {
+			return fmt.Errorf("must be one of %v", rule.enums)
+		}
+		gs[key] = raw
+	default:
+		return fmt.Errorf("unsupported kind")
+	}
+	return nil
+}
+
 func (s *BackupService) ensureSaveDir() error {
 	return os.MkdirAll(s.cfg.SaveDir, 0o755)
 }
@@ -1410,6 +1484,7 @@ func (s *BackupService) readServerConfig() (*serverConfigView, error) {
 		GameSettingsPreset: asString(doc["gameSettingsPreset"]),
 	}
 	if gs, ok := doc["gameSettings"].(map[string]interface{}); ok {
+		view.GameSettings = gs
 		if v := asInt64(gs["dayTimeDuration"]); v > 0 {
 			view.DayTimeMinutes = int(v / int64(time.Minute))
 		}
@@ -1515,6 +1590,13 @@ func (s *BackupService) updateServerConfig(p *serverConfigPayload) error {
 	}
 	if p.NightTimeMinutes != nil && *p.NightTimeMinutes > 0 {
 		gs["nightTimeDuration"] = int64(*p.NightTimeMinutes) * int64(time.Minute)
+	}
+	if len(p.GameSettings) > 0 {
+		for key, raw := range p.GameSettings {
+			if err := applyGameSetting(gs, key, raw); err != nil {
+				return fmt.Errorf("invalid %s: %w", key, err)
+			}
+		}
 	}
 
 	if p.ServerPassword != nil {

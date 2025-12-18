@@ -77,16 +77,17 @@ type backupItem struct {
 }
 
 type serverConfigView struct {
-	Name               string   `json:"name"`
-	SlotCount          int      `json:"slot_count"`
-	Tags               []string `json:"tags"`
-	VoiceChatMode      string   `json:"voice_chat_mode"`
-	EnableVoiceChat    bool     `json:"enable_voice_chat"`
-	EnableTextChat     bool     `json:"enable_text_chat"`
-	GameSettingsPreset string   `json:"game_settings_preset"`
-	DayTimeMinutes     int      `json:"day_time_minutes"`
-	NightTimeMinutes   int      `json:"night_time_minutes"`
-	ServerPassword     string   `json:"server_password"`
+	Name               string                 `json:"name"`
+	SlotCount          int                    `json:"slot_count"`
+	Tags               []string               `json:"tags"`
+	VoiceChatMode      string                 `json:"voice_chat_mode"`
+	EnableVoiceChat    bool                   `json:"enable_voice_chat"`
+	EnableTextChat     bool                   `json:"enable_text_chat"`
+	GameSettingsPreset string                 `json:"game_settings_preset"`
+	DayTimeMinutes     int                    `json:"day_time_minutes"`
+	NightTimeMinutes   int                    `json:"night_time_minutes"`
+	ServerPassword     string                 `json:"server_password"`
+	GameSettings       map[string]interface{} `json:"game_settings"`
 }
 
 type a2sInfo struct {
@@ -644,6 +645,10 @@ func (s *Server) handleActionServerConfig(w http.ResponseWriter, r *http.Request
 	if tags != nil {
 		payload["tags"] = tags
 	}
+	gs := collectGameSettings(r)
+	if len(gs) > 0 {
+		payload["game_settings"] = gs
+	}
 	if len(payload) == 0 {
 		http.Redirect(w, r, "/?msg=No+changes+submitted", http.StatusSeeOther)
 		return
@@ -697,6 +702,50 @@ func getFormBool(r *http.Request, name string) (bool, bool) {
 		return false, false
 	}
 	return parseFormBool(vals[len(vals)-1]), true
+}
+
+func collectGameSettings(r *http.Request) map[string]string {
+	keys := []string{
+		"playerHealthFactor",
+		"playerStaminaFactor",
+		"enableDurability",
+		"enableStarvingDebuff",
+		"foodBuffDurationFactor",
+		"shroudTimeFactor",
+		"tombstoneMode",
+		"weatherFrequency",
+		"enemyDamageFactor",
+		"enemyHealthFactor",
+		"enemyPerceptionRangeFactor",
+		"bossDamageFactor",
+		"bossHealthFactor",
+		"randomSpawnerAmount",
+		"aggroPoolAmount",
+		"pacifyAllEnemies",
+		"tamingStartleRepercussion",
+		"miningDamageFactor",
+		"resourceDropStackAmountFactor",
+		"plantGrowthSpeedFactor",
+		"factoryProductionSpeedFactor",
+		"perkUpgradeRecyclingFactor",
+		"perkCostFactor",
+		"experienceCombatFactor",
+		"experienceMiningFactor",
+		"experienceExplorationQuestsFactor",
+	}
+	out := map[string]string{}
+	for _, k := range keys {
+		vals := r.Form["gs_"+k]
+		if len(vals) == 0 {
+			continue
+		}
+		val := strings.TrimSpace(vals[len(vals)-1])
+		if val == "" {
+			continue
+		}
+		out[k] = val
+	}
+	return out
 }
 
 func parseTags(val string) []string {
@@ -1035,6 +1084,76 @@ const pageTemplate = `<!doctype html>
           <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
         </div>
         <input type="text" name="tags" placeholder="Tags (comma separated)" value="{{ if .ServerCfg.Tags }}{{ join .ServerCfg.Tags ", " }}{{ end }}" />
+        <div class="grid" style="margin-top:8px;">
+          <div class="card">
+            <div class="title">Players</div>
+            <input type="number" step="0.1" name="gs_playerHealthFactor" placeholder="Health factor" value="{{ index .ServerCfg.GameSettings "playerHealthFactor" }}" />
+            <input type="number" step="0.1" name="gs_playerStaminaFactor" placeholder="Stamina factor" value="{{ index .ServerCfg.GameSettings "playerStaminaFactor" }}" />
+            <label class="mode-toggle">
+              <input type="checkbox" name="gs_enableDurability" value="true" {{ if eq (index .ServerCfg.GameSettings "enableDurability") true }}checked{{ end }} />
+              <span>Durability enabled</span>
+            </label>
+            <label class="mode-toggle">
+              <input type="checkbox" name="gs_enableStarvingDebuff" value="true" {{ if eq (index .ServerCfg.GameSettings "enableStarvingDebuff") true }}checked{{ end }} />
+              <span>Starving debuff</span>
+            </label>
+            <input type="number" step="0.1" name="gs_foodBuffDurationFactor" placeholder="Food buff duration factor" value="{{ index .ServerCfg.GameSettings "foodBuffDurationFactor" }}" />
+          </div>
+          <div class="card">
+            <div class="title">Survival</div>
+            <input type="number" step="0.1" name="gs_shroudTimeFactor" placeholder="Shroud time factor" value="{{ index .ServerCfg.GameSettings "shroudTimeFactor" }}" />
+            <select name="gs_tombstoneMode" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Tombstone mode (no change)</option>
+              <option value="AddBackpackMaterials" {{ if eq (index .ServerCfg.GameSettings "tombstoneMode") "AddBackpackMaterials" }}selected{{ end }}>Keep backpack materials</option>
+              <option value="DropBackpackMaterials" {{ if eq (index .ServerCfg.GameSettings "tombstoneMode") "DropBackpackMaterials" }}selected{{ end }}>Drop backpack materials</option>
+            </select>
+            <select name="gs_weatherFrequency" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Weather frequency (no change)</option>
+              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "Low" }}selected{{ end }}>Low</option>
+              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "Normal" }}selected{{ end }}>Normal</option>
+              <option value="High" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "High" }}selected{{ end }}>High</option>
+            </select>
+          </div>
+          <div class="card">
+            <div class="title">Enemies</div>
+            <input type="number" step="0.1" name="gs_enemyDamageFactor" placeholder="Enemy damage factor" value="{{ index .ServerCfg.GameSettings "enemyDamageFactor" }}" />
+            <input type="number" step="0.1" name="gs_enemyHealthFactor" placeholder="Enemy health factor" value="{{ index .ServerCfg.GameSettings "enemyHealthFactor" }}" />
+            <input type="number" step="0.1" name="gs_enemyPerceptionRangeFactor" placeholder="Enemy perception range factor" value="{{ index .ServerCfg.GameSettings "enemyPerceptionRangeFactor" }}" />
+            <select name="gs_randomSpawnerAmount" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Spawner amount (no change)</option>
+              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "Low" }}selected{{ end }}>Low</option>
+              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "Normal" }}selected{{ end }}>Normal</option>
+              <option value="High" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "High" }}selected{{ end }}>High</option>
+            </select>
+            <select name="gs_aggroPoolAmount" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Aggro pool (no change)</option>
+              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "Low" }}selected{{ end }}>Low</option>
+              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "Normal" }}selected{{ end }}>Normal</option>
+              <option value="High" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "High" }}selected{{ end }}>High</option>
+            </select>
+            <label class="mode-toggle">
+              <input type="checkbox" name="gs_pacifyAllEnemies" value="true" {{ if eq (index .ServerCfg.GameSettings "pacifyAllEnemies") true }}checked{{ end }} />
+              <span>Pacify all enemies</span>
+            </label>
+            <select name="gs_tamingStartleRepercussion" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Taming repercussion (no change)</option>
+              <option value="LoseSomeProgress" {{ if eq (index .ServerCfg.GameSettings "tamingStartleRepercussion") "LoseSomeProgress" }}selected{{ end }}>Lose some progress</option>
+              <option value="LoseAllProgress" {{ if eq (index .ServerCfg.GameSettings "tamingStartleRepercussion") "LoseAllProgress" }}selected{{ end }}>Lose all progress</option>
+            </select>
+          </div>
+          <div class="card">
+            <div class="title">Resources / Progression</div>
+            <input type="number" step="0.1" name="gs_miningDamageFactor" placeholder="Mining damage factor" value="{{ index .ServerCfg.GameSettings "miningDamageFactor" }}" />
+            <input type="number" step="0.1" name="gs_resourceDropStackAmountFactor" placeholder="Resource drop factor" value="{{ index .ServerCfg.GameSettings "resourceDropStackAmountFactor" }}" />
+            <input type="number" step="0.1" name="gs_plantGrowthSpeedFactor" placeholder="Plant growth speed factor" value="{{ index .ServerCfg.GameSettings "plantGrowthSpeedFactor" }}" />
+            <input type="number" step="0.1" name="gs_factoryProductionSpeedFactor" placeholder="Factory production speed factor" value="{{ index .ServerCfg.GameSettings "factoryProductionSpeedFactor" }}" />
+            <input type="number" step="0.1" name="gs_perkUpgradeRecyclingFactor" placeholder="Perk upgrade recycling factor" value="{{ index .ServerCfg.GameSettings "perkUpgradeRecyclingFactor" }}" />
+            <input type="number" step="0.1" name="gs_perkCostFactor" placeholder="Perk cost factor" value="{{ index .ServerCfg.GameSettings "perkCostFactor" }}" />
+            <input type="number" step="0.1" name="gs_experienceCombatFactor" placeholder="Combat XP factor" value="{{ index .ServerCfg.GameSettings "experienceCombatFactor" }}" />
+            <input type="number" step="0.1" name="gs_experienceMiningFactor" placeholder="Mining XP factor" value="{{ index .ServerCfg.GameSettings "experienceMiningFactor" }}" />
+            <input type="number" step="0.1" name="gs_experienceExplorationQuestsFactor" placeholder="Exploration XP factor" value="{{ index .ServerCfg.GameSettings "experienceExplorationQuestsFactor" }}" />
+          </div>
+        </div>
         <button type="submit">Save + Restart</button>
       </form>
       <div class="pill" style="margin-top:6px;">
