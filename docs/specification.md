@@ -18,11 +18,12 @@ Container registry: Docker Hub org `powermountain` (multi-arch builds run on Doc
 
 1. **AMD64-only images** (`linux/amd64`) for the stack.
 2. **Game server auto-update on startup** using SteamCMD (`app_update 2278520 validate`).
-3. **Compose-first configuration**: all config via environment variables in `docker-compose.yml` / `.env`.
+3. **Simple defaults via compose**: env vars provide first-boot defaults; runtime server settings are edited in the UI and persisted to the server config (not overwritten on restart).
 4. **Status/admin web UI**:
    - Public status page (limited info).
    - Admin login (single admin user/pass from compose env vars).
    - Admin actions: **restart** server, **trigger update** (and restart), **download logs**, and **backup/restore savegames**.
+   - Edit server settings (server name, friend/server password, slots, voice/text chat, voice chat mode, preset, day/night durations, tags) with validation (e.g., unique group passwords).
 5. **S3 backup storage** included in the stack (MinIO):
    - Web UI supports **upload savegame from PC → restore on server**, and **download backups**.
    - Default retention policy enabled (basic users are covered).
@@ -81,22 +82,16 @@ Expose and document these ports (both UDP and TCP) in compose:
   - Must contain a dedicated `savegame` directory.
 
 **Environment variables (compose-driven)**
-Minimum set (names can be adjusted but must be documented and stable):
-- `SERVER_NAME`
-- `SERVER_PASSWORD` (optional)
-- `MAX_PLAYERS`
-- `GAME_PORT` (default 15636)
-- `QUERY_PORT` (default 15637)
-- `SAVE_DIR` (default `/data/savegame`)
-- `TZ`
+- Provide first-boot defaults for server settings (e.g., `SERVER_NAME`, `SERVER_PASSWORD`, `MAX_PLAYERS`, `SAVE_DIR`). After first boot, runtime values are stored in `enshrouded_server.json` and edited via the UI, not overwritten by env on restart.
+- Networking/env still configure ports and basics: `GAME_PORT` (default 15636), `QUERY_PORT` (default 15637), `SAVE_DIR` (default `/data/savegame`), `TZ`.
 
 **Entrypoint behavior**
 1. Ensure required directories exist and have correct ownership.
 2. Run SteamCMD update:
    - anonymous install supported
    - `app_update 2278520 validate`
-3. Generate a default server config if missing (idempotent).
-4. Start server.
+3. Generate a default server config if missing (idempotent) and keep a simple `server_config.txt` for launch flags.
+4. Start server using values from the persisted config (name/password/slots), not re-applying env overrides on every restart.
 
 **Health check**
 - Implement a basic health check that confirms the server process is running.
@@ -124,6 +119,7 @@ Minimum set (names can be adjusted but must be documented and stable):
     - restore backup
     - upload local savegame files (zip) → restore
     - download latest logs / server logs bundle
+    - edit server settings (name, friend/server password, slots, voice/text chat toggles, voice chat mode, preset, day/night durations, tags) with validation (e.g., group passwords must be unique) and display the live config from `enshrouded_server.json`
 
 **Authentication model**
 - Single admin account.
@@ -139,6 +135,7 @@ Minimum set (names can be adjusted but must be documented and stable):
 - UI may call:
   - backup service over internal network
   - MinIO S3 using access key/secret
+  - backup service endpoints that read/write the server config to keep the UI in sync with the running server
 
 ### 6.3 S3-compatible storage (`minio`)
 

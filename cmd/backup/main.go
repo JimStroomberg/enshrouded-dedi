@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -91,6 +92,81 @@ func uniqueValues(m map[string]string) bool {
 	return true
 }
 
+func asString(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case fmt.Stringer:
+		return t.String()
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case json.Number:
+		return t.String()
+	default:
+		return ""
+	}
+}
+
+func asBool(v interface{}) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return parseBoolValue(t)
+	}
+	return false
+}
+
+func asInt(v interface{}) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case json.Number:
+		if i, err := t.Int64(); err == nil {
+			return int(i)
+		}
+	}
+	return 0
+}
+
+func asInt64(v interface{}) int64 {
+	switch t := v.(type) {
+	case int64:
+		return t
+	case int:
+		return int64(t)
+	case float64:
+		return int64(t)
+	case json.Number:
+		if i, err := t.Int64(); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+func asStringSlice(v interface{}) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			s := strings.TrimSpace(asString(item))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // BackupService implements backup/restore endpoints.
 type BackupService struct {
 	cfg    Config
@@ -156,6 +232,8 @@ func main() {
 	r.HandleFunc("/server/restart", svc.handleRestartServer).Methods(http.MethodPost)
 	r.HandleFunc("/server/update", svc.handleUpdateServer).Methods(http.MethodPost)
 	r.HandleFunc("/server/groups", svc.handleUpdateGroupPasswords).Methods(http.MethodPost)
+	r.HandleFunc("/server/config", svc.handleGetServerConfig).Methods(http.MethodGet)
+	r.HandleFunc("/server/config", svc.handleUpdateServerConfig).Methods(http.MethodPost)
 	r.HandleFunc("/status", svc.handleStatus).Methods(http.MethodGet)
 	r.HandleFunc("/steam/auth", svc.handleSteamAuth).Methods(http.MethodPost)
 	r.HandleFunc("/steam/anonymous", svc.handleSteamAnonymous).Methods(http.MethodPost)
@@ -399,6 +477,58 @@ func (s *BackupService) handleUpdateGroupPasswords(w http.ResponseWriter, r *htt
 		return
 	}
 	if err := s.startContainer(r.Context()); err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSON(w, map[string]string{"status": "updated"})
+}
+
+type serverConfigView struct {
+	Name               string   `json:"name"`
+	SlotCount          int      `json:"slot_count"`
+	Tags               []string `json:"tags"`
+	VoiceChatMode      string   `json:"voice_chat_mode"`
+	EnableVoiceChat    bool     `json:"enable_voice_chat"`
+	EnableTextChat     bool     `json:"enable_text_chat"`
+	GameSettingsPreset string   `json:"game_settings_preset"`
+	DayTimeMinutes     int      `json:"day_time_minutes"`
+	NightTimeMinutes   int      `json:"night_time_minutes"`
+	ServerPassword     string   `json:"server_password"`
+}
+
+type serverConfigPayload struct {
+	Name               *string  `json:"name"`
+	SlotCount          *int     `json:"slot_count"`
+	Tags               []string `json:"tags"`
+	VoiceChatMode      *string  `json:"voice_chat_mode"`
+	EnableVoiceChat    *bool    `json:"enable_voice_chat"`
+	EnableTextChat     *bool    `json:"enable_text_chat"`
+	GameSettingsPreset *string  `json:"game_settings_preset"`
+	DayTimeMinutes     *int     `json:"day_time_minutes"`
+	NightTimeMinutes   *int     `json:"night_time_minutes"`
+	ServerPassword     *string  `json:"server_password"`
+}
+
+func (s *BackupService) handleGetServerConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.readServerConfig()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSON(w, cfg)
+}
+
+func (s *BackupService) handleUpdateServerConfig(w http.ResponseWriter, r *http.Request) {
+	var p serverConfigPayload
+	if err := decodeJSON(r, &p); err != nil {
+		respondError(w, http.StatusBadRequest, fmt.Errorf("invalid payload: %w", err))
+		return
+	}
+	if err := s.updateServerConfig(&p); err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.restartContainer(r.Context()); err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -1243,6 +1373,303 @@ func (s *BackupService) updateGroupPasswords(updates map[string]string) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), cfgPath)
+}
+
+func (s *BackupService) serverConfigPath() string {
+	return filepath.Clean(filepath.Join(s.cfg.SaveDir, "..", "server", "enshrouded_server.json"))
+}
+
+func (s *BackupService) serverConfigTxtPath() string {
+	return filepath.Clean(filepath.Join(s.cfg.SaveDir, "..", "server", "server_config.txt"))
+}
+
+func (s *BackupService) readServerConfig() (*serverConfigView, error) {
+	cfgPath := s.serverConfigPath()
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &serverConfigView{
+				Name:               getenv("SERVER_NAME", "Enshrouded Server"),
+				SlotCount:          atoiEnv("MAX_PLAYERS", 16),
+				GameSettingsPreset: "Default",
+			}, nil
+		}
+		return nil, err
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, err
+	}
+	view := &serverConfigView{
+		Name:               asString(doc["name"]),
+		SlotCount:          asInt(doc["slotCount"]),
+		Tags:               asStringSlice(doc["tags"]),
+		VoiceChatMode:      asString(doc["voiceChatMode"]),
+		EnableVoiceChat:    asBool(doc["enableVoiceChat"]),
+		EnableTextChat:     asBool(doc["enableTextChat"]),
+		GameSettingsPreset: asString(doc["gameSettingsPreset"]),
+	}
+	if gs, ok := doc["gameSettings"].(map[string]interface{}); ok {
+		if v := asInt64(gs["dayTimeDuration"]); v > 0 {
+			view.DayTimeMinutes = int(v / int64(time.Minute))
+		}
+		if v := asInt64(gs["nightTimeDuration"]); v > 0 {
+			view.NightTimeMinutes = int(v / int64(time.Minute))
+		}
+	}
+	if groups, ok := doc["userGroups"].([]interface{}); ok {
+		for _, g := range groups {
+			group, ok := g.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name := strings.ToLower(asString(group["name"]))
+			if name == "friend" {
+				view.ServerPassword = asString(group["password"])
+			}
+		}
+	}
+	return view, nil
+}
+
+func clampInt(val, minVal, maxVal int) int {
+	if val < minVal {
+		return minVal
+	}
+	if val > maxVal {
+		return maxVal
+	}
+	return val
+}
+
+func cleanTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		t := strings.TrimSpace(tag)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (s *BackupService) updateServerConfig(p *serverConfigPayload) error {
+	cfgPath := s.serverConfigPath()
+	raw, err := os.ReadFile(cfgPath)
+	var doc map[string]interface{}
+	if err != nil {
+		if os.IsNotExist(err) {
+			doc = s.defaultServerConfigDocument()
+		} else {
+			return err
+		}
+	} else {
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return err
+		}
+	}
+
+	txtUpdates := map[string]string{}
+
+	if p.Name != nil {
+		name := strings.TrimSpace(*p.Name)
+		doc["name"] = name
+		txtUpdates["SERVER_NAME"] = name
+	}
+	if p.SlotCount != nil {
+		slot := clampInt(*p.SlotCount, 1, 32)
+		doc["slotCount"] = slot
+		txtUpdates["MAX_PLAYERS"] = strconv.Itoa(slot)
+	}
+	if p.Tags != nil {
+		doc["tags"] = cleanTags(p.Tags)
+	}
+	if p.VoiceChatMode != nil {
+		mode := strings.TrimSpace(*p.VoiceChatMode)
+		if mode != "" && mode != "Proximity" && mode != "Global" {
+			return fmt.Errorf("invalid voice chat mode")
+		}
+		if mode != "" {
+			doc["voiceChatMode"] = mode
+		}
+	}
+	if p.EnableVoiceChat != nil {
+		doc["enableVoiceChat"] = *p.EnableVoiceChat
+	}
+	if p.EnableTextChat != nil {
+		doc["enableTextChat"] = *p.EnableTextChat
+	}
+	if p.GameSettingsPreset != nil {
+		preset := strings.TrimSpace(*p.GameSettingsPreset)
+		if preset != "" {
+			doc["gameSettingsPreset"] = preset
+		}
+	}
+	gs, ok := doc["gameSettings"].(map[string]interface{})
+	if !ok || gs == nil {
+		gs = map[string]interface{}{}
+		doc["gameSettings"] = gs
+	}
+	if p.DayTimeMinutes != nil && *p.DayTimeMinutes > 0 {
+		gs["dayTimeDuration"] = int64(*p.DayTimeMinutes) * int64(time.Minute)
+	}
+	if p.NightTimeMinutes != nil && *p.NightTimeMinutes > 0 {
+		gs["nightTimeDuration"] = int64(*p.NightTimeMinutes) * int64(time.Minute)
+	}
+
+	if p.ServerPassword != nil {
+		newPass := strings.TrimSpace(*p.ServerPassword)
+		if groups, ok := doc["userGroups"].([]interface{}); ok {
+			friendFound := false
+			for _, g := range groups {
+				group, ok := g.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				name := strings.ToLower(asString(group["name"]))
+				pass := strings.TrimSpace(asString(group["password"]))
+				if name != "friend" && newPass != "" && pass != "" && newPass == pass {
+					return errors.New("group passwords must be unique")
+				}
+				if name == "friend" {
+					group["password"] = newPass
+					friendFound = true
+				}
+			}
+			if !friendFound {
+				doc["userGroups"] = append(groups, map[string]interface{}{
+					"name":                 "Friend",
+					"password":             newPass,
+					"canKickBan":           false,
+					"canAccessInventories": true,
+					"canEditWorld":         true,
+					"canEditBase":          true,
+					"canExtendBase":        false,
+					"reservedSlots":        0,
+				})
+			}
+		} else {
+			doc["userGroups"] = []interface{}{
+				map[string]interface{}{
+					"name":                 "Friend",
+					"password":             newPass,
+					"canKickBan":           false,
+					"canAccessInventories": true,
+					"canEditWorld":         true,
+					"canEditBase":          true,
+					"canExtendBase":        false,
+					"reservedSlots":        0,
+				},
+			}
+		}
+		txtUpdates["SERVER_PASSWORD"] = newPass
+	}
+
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := s.writeAtomic(cfgPath, out); err != nil {
+		return err
+	}
+	if len(txtUpdates) > 0 {
+		if err := s.updateServerConfigTxt(txtUpdates); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *BackupService) defaultServerConfigDocument() map[string]interface{} {
+	return map[string]interface{}{
+		"name":               getenv("SERVER_NAME", "Enshrouded Server"),
+		"saveDirectory":      s.cfg.SaveDir,
+		"logDirectory":       "./logs",
+		"ip":                 "0.0.0.0",
+		"queryPort":          atoiEnv("QUERY_PORT", 15637),
+		"slotCount":          atoiEnv("MAX_PLAYERS", 16),
+		"tags":               []string{},
+		"voiceChatMode":      "Proximity",
+		"enableVoiceChat":    true,
+		"enableTextChat":     true,
+		"gameSettingsPreset": "Default",
+		"gameSettings": map[string]interface{}{
+			"dayTimeDuration":   int64(30) * int64(time.Minute),
+			"nightTimeDuration": int64(12) * int64(time.Minute),
+		},
+		"userGroups": []interface{}{
+			map[string]interface{}{"name": "Admin", "password": "", "canKickBan": true, "canAccessInventories": true, "canEditWorld": true, "canEditBase": true, "canExtendBase": true, "reservedSlots": 0},
+			map[string]interface{}{"name": "Friend", "password": "", "canKickBan": false, "canAccessInventories": true, "canEditWorld": true, "canEditBase": true, "canExtendBase": false, "reservedSlots": 0},
+			map[string]interface{}{"name": "Guest", "password": "", "canKickBan": false, "canAccessInventories": false, "canEditWorld": true, "canEditBase": false, "canExtendBase": false, "reservedSlots": 0},
+			map[string]interface{}{"name": "Visitor", "password": "", "canKickBan": false, "canAccessInventories": false, "canEditWorld": false, "canEditBase": false, "canExtendBase": false, "reservedSlots": 0},
+		},
+		"bannedAccounts": []interface{}{},
+	}
+}
+
+func (s *BackupService) updateServerConfigTxt(updates map[string]string) error {
+	cfgPath := s.serverConfigTxtPath()
+	current := map[string]string{
+		"SERVER_NAME":     getenv("SERVER_NAME", "Enshrouded Server"),
+		"SERVER_PASSWORD": getenv("SERVER_PASSWORD", ""),
+		"MAX_PLAYERS":     getenv("MAX_PLAYERS", "16"),
+		"GAME_PORT":       getenv("GAME_PORT", "15636"),
+		"QUERY_PORT":      getenv("QUERY_PORT", "15637"),
+		"SAVE_DIR":        getenv("SAVE_DIR", "/data/savegame"),
+	}
+	if raw, err := os.ReadFile(cfgPath); err == nil {
+		sc := bufio.NewScanner(bytes.NewReader(raw))
+		for sc.Scan() {
+			line := sc.Text()
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := parts[1]
+			if key == "" {
+				continue
+			}
+			current[key] = val
+		}
+	}
+	for k, v := range updates {
+		current[k] = v
+	}
+
+	keys := []string{"SERVER_NAME", "SERVER_PASSWORD", "MAX_PLAYERS", "GAME_PORT", "QUERY_PORT", "SAVE_DIR"}
+	var buf bytes.Buffer
+	for _, k := range keys {
+		if v, ok := current[k]; ok {
+			buf.WriteString(fmt.Sprintf("%s=%s\n", k, v))
+		}
+	}
+	return s.writeAtomic(cfgPath, buf.Bytes())
+}
+
+func (s *BackupService) writeAtomic(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "enshrouded-config-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chown(1000, 1000); err != nil {
+		s.logger.Printf("warn: chown %s: %v", filepath.Base(path), err)
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func respondError(w http.ResponseWriter, status int, err error) {

@@ -76,6 +76,19 @@ type backupItem struct {
 	LastModified time.Time `json:"LastModified"`
 }
 
+type serverConfigView struct {
+	Name               string   `json:"name"`
+	SlotCount          int      `json:"slot_count"`
+	Tags               []string `json:"tags"`
+	VoiceChatMode      string   `json:"voice_chat_mode"`
+	EnableVoiceChat    bool     `json:"enable_voice_chat"`
+	EnableTextChat     bool     `json:"enable_text_chat"`
+	GameSettingsPreset string   `json:"game_settings_preset"`
+	DayTimeMinutes     int      `json:"day_time_minutes"`
+	NightTimeMinutes   int      `json:"night_time_minutes"`
+	ServerPassword     string   `json:"server_password"`
+}
+
 type a2sInfo struct {
 	Name       string `json:"name"`
 	Map        string `json:"map"`
@@ -119,6 +132,7 @@ func main() {
 
 	tmpl := template.Must(template.New("page").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
+		"join":        strings.Join,
 	}).Parse(pageTemplate))
 
 	srv := &Server{
@@ -148,6 +162,7 @@ func main() {
 	r.HandleFunc("/action/steam-auth", srv.requireAuth(srv.handleActionSteamAuth)).Methods(http.MethodPost)
 	r.HandleFunc("/action/steam-anon", srv.requireAuth(srv.handleActionSteamAnon)).Methods(http.MethodPost)
 	r.HandleFunc("/action/groups", srv.requireAuth(srv.handleActionGroupPasswords)).Methods(http.MethodPost)
+	r.HandleFunc("/action/server-config", srv.requireAuth(srv.handleActionServerConfig)).Methods(http.MethodPost)
 	r.HandleFunc("/backup/download", srv.requireAuth(srv.handleDownloadBackup)).Methods(http.MethodGet)
 	r.HandleFunc("/backup/contents", srv.requireAuth(srv.handleBackupContents)).Methods(http.MethodGet)
 
@@ -182,10 +197,19 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if loggedIn {
 		backups, _ = s.fetchBackups(r.Context())
 	}
+	serverCfg, _ := s.fetchServerConfig(r.Context())
+	if serverCfg == nil {
+		serverCfg = &serverConfigView{}
+	}
+
+	serverName := s.cfg.ServerName
+	if serverCfg.Name != "" {
+		serverName = serverCfg.Name
+	}
 
 	data := map[string]interface{}{
 		"StackName":  s.cfg.StackName,
-		"ServerName": s.cfg.ServerName,
+		"ServerName": serverName,
 		"LogoURL":    s.cfg.LogoURL,
 		"SteamState": st,
 		"Status":     status,
@@ -194,6 +218,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Backups":    backups,
 		"LoggedIn":   loggedIn,
 		"Message":    r.URL.Query().Get("msg"),
+		"ServerCfg":  serverCfg,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -432,6 +457,24 @@ func (s *Server) fetchBackups(ctx context.Context) ([]backupItem, error) {
 	return items, nil
 }
 
+func (s *Server) fetchServerConfig(ctx context.Context) (*serverConfigView, error) {
+	url := fmt.Sprintf("%s/server/config", strings.TrimRight(s.cfg.BackupAPI, "/"))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstream status %s", resp.Status)
+	}
+	var cfg serverConfigView
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 func (s *Server) fetchSteamState(ctx context.Context) (*steamState, error) {
 	url := fmt.Sprintf("%s/steam/state", strings.TrimRight(s.cfg.BackupAPI, "/"))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -553,6 +596,65 @@ func (s *Server) handleActionGroupPasswords(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/?msg=Group+passwords+updated;+server+restarting", http.StatusSeeOther)
 }
 
+func (s *Server) handleActionServerConfig(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/?msg=Invalid+request", http.StatusSeeOther)
+		return
+	}
+	payload := map[string]interface{}{}
+	if v := strings.TrimSpace(r.FormValue("server_name")); v != "" {
+		payload["name"] = v
+	}
+	// Allow clearing password by sending empty string.
+	if v, ok := r.Form["server_password"]; ok {
+		if len(v) > 0 {
+			payload["server_password"] = strings.TrimSpace(v[len(v)-1])
+		} else {
+			payload["server_password"] = ""
+		}
+	}
+	if v := strings.TrimSpace(r.FormValue("slot_count")); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			payload["slot_count"] = i
+		}
+	}
+	if v := strings.TrimSpace(r.FormValue("voice_chat_mode")); v != "" {
+		payload["voice_chat_mode"] = v
+	}
+	if v, ok := getFormBool(r, "enable_voice_chat"); ok {
+		payload["enable_voice_chat"] = v
+	}
+	if v, ok := getFormBool(r, "enable_text_chat"); ok {
+		payload["enable_text_chat"] = v
+	}
+	if v := strings.TrimSpace(r.FormValue("game_settings_preset")); v != "" {
+		payload["game_settings_preset"] = v
+	}
+	if v := strings.TrimSpace(r.FormValue("day_time_minutes")); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			payload["day_time_minutes"] = i
+		}
+	}
+	if v := strings.TrimSpace(r.FormValue("night_time_minutes")); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			payload["night_time_minutes"] = i
+		}
+	}
+	tags := parseTags(r.FormValue("tags"))
+	if tags != nil {
+		payload["tags"] = tags
+	}
+	if len(payload) == 0 {
+		http.Redirect(w, r, "/?msg=No+changes+submitted", http.StatusSeeOther)
+		return
+	}
+	if err := s.triggerPOST("/server/config", payload); err != nil {
+		http.Redirect(w, r, "/?msg=Server+config+update+failed", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/?msg=Server+config+updated;+restarting", http.StatusSeeOther)
+}
+
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		session, _ := s.store.Get(r, "enshrouded-ui")
@@ -587,6 +689,29 @@ func parseFormBool(val string) bool {
 	default:
 		return false
 	}
+}
+
+func getFormBool(r *http.Request, name string) (bool, bool) {
+	vals, ok := r.Form[name]
+	if !ok || len(vals) == 0 {
+		return false, false
+	}
+	return parseFormBool(vals[len(vals)-1]), true
+}
+
+func parseTags(val string) []string {
+	if strings.TrimSpace(val) == "" {
+		return []string{}
+	}
+	parts := strings.Split(val, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func envBool(key string, def bool) bool {
@@ -877,6 +1002,46 @@ const pageTemplate = `<!doctype html>
     </div>
 
     {{ if .LoggedIn }}
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Server Settings</div>
+      <form action="/action/server-config" method="post">
+        <input type="text" name="server_name" placeholder="Server name" value="{{ .ServerCfg.Name }}" />
+        <input type="password" name="server_password" placeholder="Server password (Friend group)" value="{{ .ServerCfg.ServerPassword }}" />
+        <label class="mode-toggle" style="width:100%; justify-content:space-between;">
+          <span>Max players</span>
+          <input type="number" name="slot_count" min="1" max="32" value="{{ if .ServerCfg.SlotCount }}{{ .ServerCfg.SlotCount }}{{ else }}16{{ end }}" style="max-width:100px;" />
+        </label>
+        <label class="mode-toggle" style="width:100%; justify-content:space-between;">
+          <span>Voice chat mode</span>
+          <select name="voice_chat_mode" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+            <option value="">(no change)</option>
+            <option value="Proximity" {{ if eq .ServerCfg.VoiceChatMode "Proximity" }}selected{{ end }}>Proximity</option>
+            <option value="Global" {{ if eq .ServerCfg.VoiceChatMode "Global" }}selected{{ end }}>Global</option>
+          </select>
+        </label>
+        <input type="hidden" name="enable_voice_chat" value="false" />
+        <label class="mode-toggle">
+          <input type="checkbox" name="enable_voice_chat" value="true" {{ if .ServerCfg.EnableVoiceChat }}checked{{ end }} />
+          <span>Enable voice chat</span>
+        </label>
+        <input type="hidden" name="enable_text_chat" value="false" />
+        <label class="mode-toggle">
+          <input type="checkbox" name="enable_text_chat" value="true" {{ if .ServerCfg.EnableTextChat }}checked{{ end }} />
+          <span>Enable text chat</span>
+        </label>
+        <input type="text" name="game_settings_preset" placeholder="Game settings preset" value="{{ .ServerCfg.GameSettingsPreset }}" />
+        <div class="stack">
+          <input type="number" name="day_time_minutes" min="1" placeholder="Day duration (minutes)" value="{{ if .ServerCfg.DayTimeMinutes }}{{ .ServerCfg.DayTimeMinutes }}{{ end }}" />
+          <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
+        </div>
+        <input type="text" name="tags" placeholder="Tags (comma separated)" value="{{ if .ServerCfg.Tags }}{{ join .ServerCfg.Tags \", \" }}{{ end }}" />
+        <button type="submit">Save + Restart</button>
+      </form>
+      <div class="pill" style="margin-top:6px;">
+        Changes apply on restart. Name/password are stored in the server config (not env) so they stay in sync with the running server.
+      </div>
+    </div>
+
     <div class="card" style="margin-bottom:14px;">
       <div class="title">Restore</div>
       <form action="/action/restore" method="post" class="stack">

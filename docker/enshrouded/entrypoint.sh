@@ -11,7 +11,6 @@ RATE_LIMIT_FILE="/data/steam_rate_limit.lock"
 STEAM_HOME="/data/steamcmd-home"
 WINE_BIN="/usr/bin/wine"
 STEAM_AUTH_FILE="/data/steam_auth.env"
-SERVER_CONFIG_JSON="$SERVER_DIR/enshrouded_server.json"
 if [ ! -x "$WINE_BIN" ] && [ -x "/usr/bin/wine64" ]; then
   WINE_BIN="/usr/bin/wine64"
 fi
@@ -42,6 +41,21 @@ load_steam_auth() {
   if [ -f "$STEAM_AUTH_FILE" ]; then
     # shellcheck disable=SC1090
     set -a && source "$STEAM_AUTH_FILE" && set +a
+  fi
+}
+
+config_get() {
+  local key="$1"
+  local def="${2:-}"
+  local cfg="$SERVER_DIR/server_config.txt"
+  local val=""
+  if [ -f "$cfg" ]; then
+    val=$(grep -E "^${key}=" "$cfg" | tail -n1 | cut -d= -f2-)
+  fi
+  if [ -n "$val" ]; then
+    echo "$val"
+  else
+    echo "$def"
   fi
 }
 
@@ -173,59 +187,23 @@ SAVE_DIR=${SAVE_DIR:-/data/savegame}
 CONFIG
 }
 
-sync_json_config() {
-  if [ ! -f "$SERVER_CONFIG_JSON" ]; then
-    echo "[enshrouded] server config $SERVER_CONFIG_JSON not found; skipping json sync."
-    return
-  fi
-  python3 - "$SERVER_CONFIG_JSON" <<'PY'
-import json
-import os
-import sys
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    data = json.load(f)
-
-name = os.getenv("SERVER_NAME") or "Enshrouded Server"
-save_dir = os.getenv("SAVE_DIR") or "/data/savegame"
-query_port = os.getenv("QUERY_PORT") or "15637"
-max_players = os.getenv("MAX_PLAYERS") or "16"
-password = os.getenv("SERVER_PASSWORD", "")
-
-data["name"] = name
-data["saveDirectory"] = save_dir
-try:
-    data["queryPort"] = int(query_port)
-except ValueError:
-    pass
-try:
-    data["slotCount"] = int(max_players)
-except ValueError:
-    pass
-
-if password:
-    groups = data.get("userGroups")
-    if isinstance(groups, list):
-        for group in groups:
-            if isinstance(group, dict) and group.get("name") == "Friend":
-                group["password"] = password
-                break
-
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-PY
-}
-
 run_server() {
   local bin="$SERVER_DIR/enshrouded_server.exe"
   if [ ! -f "$bin" ]; then
     echo "[enshrouded] server binary missing at $bin (run Steam update after login)"
     tail -f /dev/null
   fi
-  local args=("$bin" "-log" "-SteamServerGamePort=${GAME_PORT:-15636}" "-SteamServerQueryPort=${QUERY_PORT:-15637}" "-ServerName=${SERVER_NAME:-Enshrouded Server}" "-SaveDirectory=${SAVE_DIR:-/data/savegame}" "-MaxPlayers=${MAX_PLAYERS:-16}")
-  if [ -n "${SERVER_PASSWORD:-}" ]; then
-    args+=("-Password=${SERVER_PASSWORD}")
+  local game_port query_port server_name server_password save_dir max_players
+  game_port=$(config_get "GAME_PORT" "${GAME_PORT:-15636}")
+  query_port=$(config_get "QUERY_PORT" "${QUERY_PORT:-15637}")
+  server_name=$(config_get "SERVER_NAME" "${SERVER_NAME:-Enshrouded Server}")
+  server_password=$(config_get "SERVER_PASSWORD" "${SERVER_PASSWORD:-}")
+  save_dir=$(config_get "SAVE_DIR" "${SAVE_DIR:-/data/savegame}")
+  max_players=$(config_get "MAX_PLAYERS" "${MAX_PLAYERS:-16}")
+
+  local args=("$bin" "-log" "-SteamServerGamePort=${game_port}" "-SteamServerQueryPort=${query_port}" "-ServerName=${server_name}" "-SaveDirectory=${save_dir}" "-MaxPlayers=${max_players}")
+  if [ -n "$server_password" ]; then
+    args+=("-Password=${server_password}")
   fi
   echo "[enshrouded] launching server via wine"
   exec "$WINE_BIN" "${args[@]}"
@@ -236,6 +214,5 @@ if [ "${UPDATE_ON_START:-true}" = "true" ]; then
   update_server
 fi
 
-sync_json_config
 generate_config
 run_server
