@@ -80,6 +80,17 @@ func parseBoolValue(val string) bool {
 	}
 }
 
+func uniqueValues(m map[string]string) bool {
+	seen := make(map[string]struct{}, len(m))
+	for _, v := range m {
+		if _, ok := seen[v]; ok {
+			return false
+		}
+		seen[v] = struct{}{}
+	}
+	return true
+}
+
 // BackupService implements backup/restore endpoints.
 type BackupService struct {
 	cfg    Config
@@ -372,6 +383,10 @@ func (s *BackupService) handleUpdateGroupPasswords(w http.ResponseWriter, r *htt
 	addUpdate("visitor", p.Visitor)
 	if len(updates) == 0 {
 		respondError(w, http.StatusBadRequest, errors.New("no group passwords provided"))
+		return
+	}
+	if !uniqueValues(updates) {
+		respondError(w, http.StatusBadRequest, errors.New("group passwords must be unique"))
 		return
 	}
 

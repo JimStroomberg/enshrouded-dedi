@@ -935,6 +935,23 @@ const pageTemplate = `<!doctype html>
           }
         });
       })();
+      (function() {
+        const form = document.getElementById('groups-form');
+        if (!form) return;
+        form.addEventListener('submit', (e) => {
+          const fields = ['group_admin','group_friend','group_guest','group_visitor'];
+          const values = [];
+          fields.forEach(name => {
+            const v = (form.querySelector(`[name=\"${name}\"]`)?.value || '').trim();
+            if (v) values.push(v);
+          });
+          const unique = new Set(values);
+          if (values.length > unique.size) {
+            e.preventDefault();
+            alert('Group passwords must be unique. Please use different passwords for each group.');
+          }
+        });
+      })();
     </script>
 
     <div class="card" style="margin-bottom:14px;">
@@ -949,7 +966,7 @@ const pageTemplate = `<!doctype html>
 
     <div class="card" style="margin-bottom:14px;">
       <div class="title">Access Groups</div>
-      <form action="/action/groups" method="post">
+      <form id="groups-form" action="/action/groups" method="post">
         <input type="password" name="group_admin" placeholder="Admin group password (optional)" />
         <input type="password" name="group_friend" placeholder="Friend group password (recommended)" />
         <input type="password" name="group_guest" placeholder="Guest group password (optional)" />
@@ -958,6 +975,7 @@ const pageTemplate = `<!doctype html>
       </form>
       <div class="pill" style="margin-top:6px;">
         Leave fields blank to keep them unchanged. Players typically join with the Friend group password.
+        Passwords must be unique across groups.
       </div>
     </div>
 
