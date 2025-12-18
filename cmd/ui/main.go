@@ -942,7 +942,8 @@ const pageTemplate = `<!doctype html>
           const fields = ['group_admin','group_friend','group_guest','group_visitor'];
           const values = [];
           fields.forEach(name => {
-            const v = (form.querySelector(`[name=\"${name}\"]`)?.value || '').trim();
+            const el = form.querySelector('[name=\"' + name + '\"]');
+            const v = (el && el.value || '').trim();
             if (v) values.push(v);
           });
           const unique = new Set(values);
