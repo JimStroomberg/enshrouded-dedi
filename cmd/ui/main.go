@@ -969,6 +969,8 @@ const pageTemplate = `<!doctype html>
     form { margin: 0; }
     button, .ghost { appearance: none; border: 1px solid var(--border); background: rgba(255,255,255,0.06); color: var(--text); padding: 10px 12px; border-radius: 10px; cursor: pointer; font-weight: 600; letter-spacing: 0.01em; transition: 0.2s ease; }
     button:hover, .ghost:hover { border-color: var(--accent); box-shadow: var(--glow); }
+    .danger { border-color: #f97316; background: rgba(249,115,22,0.12); box-shadow: 0 0 0 1px rgba(249,115,22,0.35), 0 10px 30px rgba(249,115,22,0.25); color: #fed7aa; }
+    .danger:hover { box-shadow: 0 0 0 1px rgba(249,115,22,0.45), 0 14px 40px rgba(249,115,22,0.35); }
     .stack { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .msg { margin-top: 12px; color: var(--accent); font-weight: 600; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -1043,9 +1045,9 @@ const pageTemplate = `<!doctype html>
         <div class="card">
           <div class="title">Actions</div>
           <div class="stack">
-            <form action="/action/restart" method="post"><button type="submit">Restart</button></form>
-            <form action="/action/update" method="post"><button type="submit">Trigger Update</button></form>
-            <form action="/action/backup" method="post"><button type="submit">Backup Now</button></form>
+            <form action="/action/restart" method="post"><button type="submit" class="danger">Restart</button></form>
+            <form action="/action/update" method="post"><button type="submit" class="danger">Trigger Update</button></form>
+            <form action="/action/backup" method="post"><button type="submit" class="danger">Backup Now</button></form>
             <a class="ghost" href="/logs">Download Logs</a>
           </div>
         </div>
@@ -1080,10 +1082,6 @@ const pageTemplate = `<!doctype html>
           <input type="checkbox" name="enable_text_chat" value="true" {{ if .ServerCfg.EnableTextChat }}checked{{ end }} />
           <span>Enable text chat</span>
         </label>
-        <div class="stack" style="align-items:center; gap:10px; flex-wrap:wrap;">
-          <input type="text" id="preset-field" name="game_settings_preset" placeholder="Game settings preset" value="{{ .ServerCfg.GameSettingsPreset }}" style="max-width:260px;" />
-          <button type="button" id="reset-defaults" class="ghost">Reset to default values</button>
-        </div>
         <div class="stack">
           <input type="number" name="day_time_minutes" min="1" placeholder="Day duration (minutes)" value="{{ if .ServerCfg.DayTimeMinutes }}{{ .ServerCfg.DayTimeMinutes }}{{ end }}" />
           <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
@@ -1207,7 +1205,10 @@ const pageTemplate = `<!doctype html>
             </label>
           </div>
         </div>
-        <button type="submit">Save + Restart</button>
+        <div class="stack" style="margin-top:8px; gap:10px; flex-wrap:wrap;">
+          <button type="submit" class="danger">Save + Restart</button>
+          <button type="button" id="reset-defaults" class="ghost">Reset to default values</button>
+        </div>
       </form>
       <div class="pill" style="margin-top:6px;">
         Changes apply on restart. Name/password are stored in the server config (not env) so they stay in sync with the running server.
@@ -1216,29 +1217,29 @@ const pageTemplate = `<!doctype html>
 
     <div class="card" style="margin-bottom:14px;">
       <div class="title">Restore</div>
-      <form action="/action/restore" method="post" class="stack">
-        <select id="restore-select" name="name" style="padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-          {{ range .Backups }}
-            <option value="{{ .Key }}">{{ .Key }} ({{ .LastModified.Format "2006-01-02 15:04" }})</option>
-          {{ end }}
-        </select>
-        <button type="submit">Restore</button>
-        <button type="button" id="preview-backup">Preview</button>
-        <label class="mode-toggle">
-          <input type="checkbox" name="backup_before" value="true" checked />
-          <span>Backup before restore</span>
-        </label>
-      </form>
+            <form action="/action/restore" method="post" class="stack">
+              <select id="restore-select" name="name" style="padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+                {{ range .Backups }}
+                  <option value="{{ .Key }}">{{ .Key }} ({{ .LastModified.Format "2006-01-02 15:04" }})</option>
+                {{ end }}
+              </select>
+              <button type="submit" class="danger">Restore</button>
+              <button type="button" id="preview-backup">Preview</button>
+              <label class="mode-toggle">
+                <input type="checkbox" name="backup_before" value="true" checked />
+                <span>Backup before restore</span>
+              </label>
+            </form>
       <div id="backup-contents" class="pill" style="margin-top:8px; display:none; white-space:pre-wrap;"></div>
-      <form action="/action/upload" method="post" enctype="multipart/form-data" class="stack" style="margin-top:10px;">
-        <input type="file" name="file" required />
-        <label class="mode-toggle">
-          <input type="checkbox" name="backup_before" value="true" checked />
-          <span>Backup before restore</span>
-        </label>
-        <button type="submit">Upload + Restore</button>
-      </form>
-    </div>
+            <form action="/action/upload" method="post" enctype="multipart/form-data" class="stack" style="margin-top:10px;">
+              <input type="file" name="file" required />
+              <label class="mode-toggle">
+                <input type="checkbox" name="backup_before" value="true" checked />
+                <span>Backup before restore</span>
+              </label>
+              <button type="submit" class="danger">Upload + Restore</button>
+            </form>
+          </div>
     <script>
       (function() {
         const previewBtn = document.getElementById('preview-backup');
@@ -1338,8 +1339,6 @@ const pageTemplate = `<!doctype html>
             gs_experienceExplorationQuestsFactor: '1',
           };
           Object.keys(defaults).forEach(k => setVal(k, defaults[k]));
-          const preset = form.querySelector('#preset-field');
-          if (preset) preset.value = defaults.game_settings_preset;
           alert('Default values applied. Click "Save + Restart" to apply.');
         });
       })();
@@ -1362,7 +1361,7 @@ const pageTemplate = `<!doctype html>
         <input type="password" name="group_friend" placeholder="Friend group password (recommended)" />
         <input type="password" name="group_guest" placeholder="Guest group password (optional)" />
         <input type="password" name="group_visitor" placeholder="Visitor group password (optional)" />
-        <button type="submit">Save + Restart</button>
+        <button type="submit" class="danger">Save + Restart</button>
       </form>
       <div class="pill" style="margin-top:6px;">
         Leave fields blank to keep them unchanged. Players typically join with the Friend group password.
