@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 120" role="img" aria-labelledby="title desc">
+  <title id="title">Goodfellas Enshrouded</title>
+  <desc id="desc">A warm ember crest with the letters GF.</desc>
+  <defs>
+    <linearGradient id="ember" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#c2410c"/>
+      <stop offset="0.55" stop-color="#f97316"/>
+      <stop offset="1" stop-color="#fdba74"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#ember)" d="M63 112C24 94 10 65 25 39c8-14 21-23 36-31-3 18 4 28 15 37 5-16 16-26 30-34 3 19 17 30 17 51 0 27-20 47-60 50z"/>
+  <path fill="#071018" d="M63 97c-16-8-23-20-19-34 3-8 9-14 16-19 0 11 5 17 12 22 3-9 8-15 15-19 2 11 9 17 9 29 0 12-10 20-33 21z" opacity=".9"/>
+  <text x="139" y="75" fill="#f8fafc" font-family="system-ui,Segoe UI,sans-serif" font-size="52" font-weight="800" letter-spacing="4">GOODFELLAS</text>
+  <text x="142" y="101" fill="#fdba74" font-family="system-ui,Segoe UI,sans-serif" font-size="19" font-weight="650" letter-spacing="7">ENSHROUDED</text>
+</svg>

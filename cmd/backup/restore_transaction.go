@@ -83,7 +83,9 @@ func (s *BackupService) applyPreparedRestore(ctx context.Context, prepared *prep
 		if oldSaveMoved {
 			recoveryErr = s.rollbackAppliedRestore(rollbackRoot, configBackup, wasRunning)
 		} else if stopped && wasRunning {
-			recoveryErr = s.startContainer(context.Background())
+			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			recoveryErr = s.startContainer(recoveryCtx)
+			cancel()
 		}
 		if recoveryErr != nil {
 			err = errors.Join(err, fmt.Errorf("restore recovery failed: %w", recoveryErr))

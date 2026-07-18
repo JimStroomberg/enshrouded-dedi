@@ -14,6 +14,7 @@ services:
         test -f /data/savegame/characters-index || printf 'original-characters-index\n' >/data/savegame/characters-index
         test -f /data/server/enshrouded_server.json || printf '{"name":"restore-drill","saveDirectory":"/data/savegame"}\n' >/data/server/enshrouded_server.json
         test -f /data/server/server_config.txt || printf 'SAVE_DIR=/data/savegame\n' >/data/server/server_config.txt
+        chown -R 1000:1000 /data
         exec tail -f /dev/null
     volumes:
       - drill_data:/data
@@ -29,6 +30,14 @@ services:
     environment:
       MINIO_ROOT_USER: drill-access
       MINIO_ROOT_PASSWORD: drill-secret-key
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /data:size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 1s
@@ -57,16 +66,48 @@ services:
       BACKUP_MAX_EXTRACT_BYTES: "104857600"
       BACKUP_HEALTH_TIMEOUT_SECONDS: "30"
       ENSHROUDED_CONTAINER_NAME: enshrouded-restore-drill-game
+      BACKUP_INTERNAL_TOKEN: restore-drill-internal-token-32chars
+      DOCKER_CONTROLLER_TOKEN: restore-drill-controller-token-32chars
+      DOCKER_HOST: http://controller:2375
     volumes:
       - drill_data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     depends_on:
       game:
         condition: service_healthy
       minio:
         condition: service_healthy
+      controller:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:7000/ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  controller:
+    image: enshrouded-controller:restore-drill
+    platform: linux/amd64
+    environment:
+      ENSHROUDED_CONTAINER_NAME: enshrouded-restore-drill-game
+      DOCKER_CONTROLLER_TOKEN: restore-drill-controller-token-32chars
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2375/health"]
       interval: 1s
       timeout: 1s
       retries: 30

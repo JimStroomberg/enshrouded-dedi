@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .StackName }} | Enshrouded</title>
+  <style>
+    :root {
+      --bg: radial-gradient(circle at 15% 20%, #0b1c28, #071018 45%, #04070c 100%);
+      --card: rgba(255,255,255,0.05);
+      --accent: #f97316;
+      --text: #f8fafc;
+      --muted: #cbd5e1;
+      --border: rgba(255,255,255,0.08);
+      --glow: 0 10px 40px rgba(249,115,22,0.25);
+      --shadow: 0 30px 80px rgba(0,0,0,0.5);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Space Grotesk", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+      padding: 24px;
+    }
+    .shell {
+      width: 100%;
+      max-width: 960px;
+      margin: 0 auto;
+      background: linear-gradient(160deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(6px);
+    }
+    header, .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    h1 { margin: 6px 0 4px 0; font-size: 26px; letter-spacing: 0.01em; }
+    .hero { margin-bottom: 18px; }
+    .hero-sub { margin: 0; color: var(--muted); }
+    .badge { padding: 6px 10px; border-radius: 10px; background: rgba(249,115,22,0.08); border: 1px solid rgba(249,115,22,0.35); font-size: 12px; color: #fb923c; box-shadow: var(--glow); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    .title { font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px; }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 16px; }
+    .dot { width: 10px; height: 10px; border-radius: 999px; }
+    .dot.ok { background: #34d399; box-shadow: 0 0 0 6px rgba(52,211,153,0.15); }
+    .dot.down { background: #f97316; box-shadow: 0 0 0 6px rgba(249,115,22,0.15); }
+    form { margin: 0; }
+    button, .ghost { appearance: none; border: 1px solid var(--border); background: rgba(255,255,255,0.06); color: var(--text); padding: 10px 12px; border-radius: 10px; cursor: pointer; font-weight: 600; letter-spacing: 0.01em; transition: 0.2s ease; }
+    button:hover, .ghost:hover { border-color: var(--accent); box-shadow: var(--glow); }
+    .danger { border-color: #f97316; background: rgba(249,115,22,0.12); box-shadow: 0 0 0 1px rgba(249,115,22,0.35), 0 10px 30px rgba(249,115,22,0.25); color: #fed7aa; }
+    .danger:hover { box-shadow: 0 0 0 1px rgba(249,115,22,0.45), 0 14px 40px rgba(249,115,22,0.35); }
+    .stack { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .msg { margin-top: 12px; color: var(--accent); font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 8px 6px; text-align: left; color: var(--muted); }
+    th { text-transform: uppercase; letter-spacing: 0.05em; font-size: 12px; }
+    tr:nth-child(odd) td { background: rgba(255,255,255,0.02); }
+    input[type="text"], input[type="password"], input[type="file"] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); margin-bottom: 10px; }
+    .pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .hero-wrap { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .logo { max-height: 54px; object-fit: contain; filter: drop-shadow(0 8px 18px rgba(0,0,0,0.35)); }
+    .mode-toggle { display: inline-flex; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); }
+    .mode-toggle input { margin: 0; }
+    .mode-toggle span { flex: 1; min-width: 0; }
+    .mode-toggle input[type="number"], .mode-toggle input[type="text"], .mode-toggle select { max-width: 140px; min-width: 110px; }
+    .status-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; border:1px solid var(--border); background: rgba(255,255,255,0.04); }
+    .status-pill.warn { border-color:#f97316; color:#f97316; }
+    .howto { margin: 0; padding-left: 18px; color: var(--muted); }
+    .howto li { margin-bottom: 6px; }
+    @media (max-width: 640px) {
+      body { padding: 8px; }
+      .shell { padding: 14px; border-radius: 12px; }
+      .grid { grid-template-columns: 1fr; }
+      button, .ghost { min-height: 44px; }
+      table { min-width: 640px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero-wrap">
+      <div class="hero">
+        <div class="badge">{{ .StackName }}</div>
+        <h1>{{ .ServerName }}</h1>
+        <p class="hero-sub">Enshrouded dedicated server control</p>
+      </div>
+      <header>
+        <div class="stack">
+          {{ if .LoggedIn }}
+            <form action="/logout" method="post">{{ .CSRFField }}<button type="submit">Logout</button></form>
+          {{ else }}
+            <form action="/login" method="post" class="stack">
+              {{ .CSRFField }}
+              <input type="text" name="username" placeholder="Admin user" required />
+              <input type="password" name="password" placeholder="Password" required />
+              <button type="submit">Login</button>
+            </form>
+          {{ end }}
+        </div>
+        {{ if .LogoURL }}
+          <img class="logo" src="{{ .LogoURL }}" alt="Enshrouded" />
+        {{ end }}
+      </header>
+    </div>
+
+    {{ if .Message }}<div class="msg">{{ .Message }}</div>{{ end }}
+
+    <div class="grid" style="margin-bottom:16px;">
+      <div class="card">
+        <div class="title">Server</div>
+        {{ if .Status }}
+          <div class="status">
+            {{ if .Status.Running }}<div class="dot ok"></div>{{ else }}<div class="dot down"></div>{{ end }}
+            <div>
+              <div>{{ .Status.Name }}</div>
+              <div class="pill" style="margin-top:6px;">State: {{ .Status.State }}</div>
+              {{ if .Stats }}
+                <div class="pill" style="margin-top:6px;">Players: {{ .Stats.Players }} / {{ .Stats.MaxPlayers }}</div>
+                {{ if .Stats.Version }}<div class="pill" style="margin-top:6px;">Build: {{ .Stats.Version }}</div>{{ end }}
+                {{ if .Stats.Map }}<div class="pill" style="margin-top:6px;">Map: {{ .Stats.Map }}</div>{{ end }}
+              {{ else if .StatsErr }}
+                <div class="pill status-pill warn" style="margin-top:6px;">Query failed; retry later.</div>
+              {{ end }}
+            </div>
+          </div>
+        {{ else }}
+          <div class="status"><div class="dot down"></div><div>Unknown (backup API unreachable)</div></div>
+        {{ end }}
+      </div>
+      {{ if .LoggedIn }}
+        <div class="card">
+          <div class="title">Actions</div>
+          <div class="stack">
+            <form action="/action/restart" method="post">{{ .CSRFField }}<button type="submit" class="danger">Restart</button></form>
+            <form action="/action/update" method="post">{{ .CSRFField }}<button type="submit" class="danger">Trigger Update</button></form>
+            <form action="/action/backup" method="post">{{ .CSRFField }}<button type="submit">Backup Now</button></form>
+            <a class="ghost" href="/logs">Download Logs</a>
+            <a class="ghost" href="/diagnostics">Diagnostics Bundle</a>
+          </div>
+        </div>
+      {{ end }}
+    </div>
+
+    {{ if .LoggedIn }}
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Recent Operations</div>
+      {{ with .Operations }}
+        {{ with .LastBackup }}
+          <div class="stack" style="margin-bottom:10px;">
+            <span class="pill">Latest backup: {{ .Name }}</span>
+            <span class="pill">{{ formatBytes .Size }}</span>
+            <span class="pill">Checksum: {{ if .ChecksumStatus }}{{ .ChecksumStatus }}{{ else }}legacy / unknown{{ end }}</span>
+          </div>
+        {{ end }}
+        {{ with .NextScheduledRun }}<div class="pill" style="margin-bottom:10px;">Next scheduled run: {{ .Format "2006-01-02 15:04" }}</div>{{ end }}
+      {{ end }}
+      {{ if .Jobs }}
+        <table>
+          <thead><tr><th>Operation</th><th>State</th><th>Started</th><th>Result</th></tr></thead>
+          <tbody>
+          {{ range .Jobs }}
+            <tr {{ if or (eq .State "queued") (eq .State "running") }}data-active-job="true"{{ end }}>
+              <td>{{ .Type }}<div class="pill" style="margin-top:4px;">{{ .ID }}</div></td>
+              <td><span class="pill">{{ .State }}</span></td>
+              <td>{{ .CreatedAt.Format "2006-01-02 15:04:05" }}</td>
+              <td>{{ if .Error }}{{ .Error }}{{ else if eq .State "succeeded" }}Completed in {{ .DurationMS }} ms{{ else }}Waiting…{{ end }}</td>
+            </tr>
+          {{ end }}
+          </tbody>
+        </table>
+      {{ else }}
+        <div class="pill">No operations recorded since the control service started.</div>
+      {{ end }}
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Server Settings</div>
+      <form action="/action/server-config" method="post">
+        {{ .CSRFField }}
+        <input type="text" name="server_name" placeholder="Server name" value="{{ .ServerCfg.Name }}" />
+        <input type="password" name="server_password" placeholder="New Friend password (leave blank to keep current)" autocomplete="new-password" />
+        <label class="mode-toggle">
+          <input type="checkbox" name="clear_server_password" value="true" />
+          <span>Clear the Friend password</span>
+        </label>
+        <label class="mode-toggle" style="width:100%; justify-content:space-between;">
+          <span>Max players</span>
+          <input type="number" name="slot_count" min="1" max="32" value="{{ if .ServerCfg.SlotCount }}{{ .ServerCfg.SlotCount }}{{ else }}16{{ end }}" style="max-width:100px;" />
+        </label>
+        <label class="mode-toggle" style="width:100%; justify-content:space-between;">
+          <span>Voice chat mode</span>
+          <select name="voice_chat_mode" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+            <option value="">(no change)</option>
+            <option value="Proximity" {{ if eq .ServerCfg.VoiceChatMode "Proximity" }}selected{{ end }}>Proximity</option>
+            <option value="Global" {{ if eq .ServerCfg.VoiceChatMode "Global" }}selected{{ end }}>Global</option>
+          </select>
+        </label>
+        <input type="hidden" name="enable_voice_chat" value="false" />
+        <label class="mode-toggle">
+          <input type="checkbox" name="enable_voice_chat" value="true" {{ if .ServerCfg.EnableVoiceChat }}checked{{ end }} />
+          <span>Enable voice chat</span>
+        </label>
+        <input type="hidden" name="enable_text_chat" value="false" />
+        <label class="mode-toggle">
+          <input type="checkbox" name="enable_text_chat" value="true" {{ if .ServerCfg.EnableTextChat }}checked{{ end }} />
+          <span>Enable text chat</span>
+        </label>
+        <div class="stack">
+          <input type="number" name="day_time_minutes" min="1" placeholder="Day duration (minutes)" value="{{ if .ServerCfg.DayTimeMinutes }}{{ .ServerCfg.DayTimeMinutes }}{{ end }}" />
+          <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
+        </div>
+        <input type="text" name="tags" placeholder="Tags (comma separated)" value="{{ if .ServerCfg.Tags }}{{ join .ServerCfg.Tags ", " }}{{ end }}" />
+        <div class="grid" style="margin-top:8px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));">
+          <div class="card">
+            <div class="title">Players</div>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Health factor (playerHealthFactor)</span>
+              <input type="number" step="0.1" name="gs_playerHealthFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "playerHealthFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Stamina factor (playerStaminaFactor)</span>
+              <input type="number" step="0.1" name="gs_playerStaminaFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "playerStaminaFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle">
+              <input type="checkbox" name="gs_enableDurability" value="true" {{ if eq (index .ServerCfg.GameSettings "enableDurability") true }}checked{{ end }} />
+              <span>Durability enabled</span>
+            </label>
+            <label class="mode-toggle">
+              <input type="checkbox" name="gs_enableStarvingDebuff" value="true" {{ if eq (index .ServerCfg.GameSettings "enableStarvingDebuff") true }}checked{{ end }} />
+              <span>Starving debuff</span>
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Food buff duration (foodBuffDurationFactor)</span>
+              <input type="number" step="0.1" name="gs_foodBuffDurationFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "foodBuffDurationFactor" }}" style="max-width:110px;" />
+            </label>
+          </div>
+          <div class="card">
+            <div class="title">Survival</div>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Shroud time (shroudTimeFactor)</span>
+              <input type="number" step="0.1" name="gs_shroudTimeFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "shroudTimeFactor" }}" style="max-width:110px;" />
+            </label>
+            <select name="gs_tombstoneMode" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Tombstone mode (no change)</option>
+              <option value="AddBackpackMaterials" {{ if eq (index .ServerCfg.GameSettings "tombstoneMode") "AddBackpackMaterials" }}selected{{ end }}>Keep backpack materials</option>
+              <option value="DropBackpackMaterials" {{ if eq (index .ServerCfg.GameSettings "tombstoneMode") "DropBackpackMaterials" }}selected{{ end }}>Drop backpack materials</option>
+            </select>
+            <select name="gs_weatherFrequency" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Weather frequency (no change)</option>
+              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "Low" }}selected{{ end }}>Low</option>
+              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "Normal" }}selected{{ end }}>Normal</option>
+              <option value="High" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "High" }}selected{{ end }}>High</option>
+            </select>
+          </div>
+          <div class="card">
+            <div class="title">Enemies</div>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Enemy damage (enemyDamageFactor)</span>
+              <input type="number" step="0.1" name="gs_enemyDamageFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyDamageFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Enemy health (enemyHealthFactor)</span>
+              <input type="number" step="0.1" name="gs_enemyHealthFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyHealthFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Enemy perception (enemyPerceptionRangeFactor)</span>
+              <input type="number" step="0.1" name="gs_enemyPerceptionRangeFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyPerceptionRangeFactor" }}" style="max-width:110px;" />
+            </label>
+            <select name="gs_randomSpawnerAmount" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Spawner amount (no change)</option>
+              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "Low" }}selected{{ end }}>Low</option>
+              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "Normal" }}selected{{ end }}>Normal</option>
+              <option value="High" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "High" }}selected{{ end }}>High</option>
+            </select>
+            <select name="gs_aggroPoolAmount" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Aggro pool (no change)</option>
+              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "Low" }}selected{{ end }}>Low</option>
+              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "Normal" }}selected{{ end }}>Normal</option>
+              <option value="High" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "High" }}selected{{ end }}>High</option>
+            </select>
+            <label class="mode-toggle">
+              <input type="checkbox" name="gs_pacifyAllEnemies" value="true" {{ if eq (index .ServerCfg.GameSettings "pacifyAllEnemies") true }}checked{{ end }} />
+              <span>Pacify all enemies</span>
+            </label>
+            <select name="gs_tamingStartleRepercussion" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+              <option value="">Taming repercussion (no change)</option>
+              <option value="LoseSomeProgress" {{ if eq (index .ServerCfg.GameSettings "tamingStartleRepercussion") "LoseSomeProgress" }}selected{{ end }}>Lose some progress</option>
+              <option value="LoseAllProgress" {{ if eq (index .ServerCfg.GameSettings "tamingStartleRepercussion") "LoseAllProgress" }}selected{{ end }}>Lose all progress</option>
+            </select>
+          </div>
+          <div class="card">
+            <div class="title">Resources / Progression</div>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Mining damage (miningDamageFactor)</span>
+              <input type="number" step="0.1" name="gs_miningDamageFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "miningDamageFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Resource drop (resourceDropStackAmountFactor)</span>
+              <input type="number" step="0.1" name="gs_resourceDropStackAmountFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "resourceDropStackAmountFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Plant growth (plantGrowthSpeedFactor)</span>
+              <input type="number" step="0.1" name="gs_plantGrowthSpeedFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "plantGrowthSpeedFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Factory production (factoryProductionSpeedFactor)</span>
+              <input type="number" step="0.1" name="gs_factoryProductionSpeedFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "factoryProductionSpeedFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Perk recycling (perkUpgradeRecyclingFactor)</span>
+              <input type="number" step="0.1" name="gs_perkUpgradeRecyclingFactor" placeholder="0.5" value="{{ index .ServerCfg.GameSettings "perkUpgradeRecyclingFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Perk cost (perkCostFactor)</span>
+              <input type="number" step="0.1" name="gs_perkCostFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "perkCostFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Combat XP (experienceCombatFactor)</span>
+              <input type="number" step="0.1" name="gs_experienceCombatFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceCombatFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Mining XP (experienceMiningFactor)</span>
+              <input type="number" step="0.1" name="gs_experienceMiningFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceMiningFactor" }}" style="max-width:110px;" />
+            </label>
+            <label class="mode-toggle" style="justify-content:space-between;">
+              <span>Exploration XP (experienceExplorationQuestsFactor)</span>
+              <input type="number" step="0.1" name="gs_experienceExplorationQuestsFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceExplorationQuestsFactor" }}" style="max-width:110px;" />
+            </label>
+          </div>
+        </div>
+        <div class="stack" style="margin-top:8px; gap:10px; flex-wrap:wrap;">
+          <button type="submit" class="danger">Save + Restart</button>
+          <button type="button" id="reset-defaults" class="ghost">Reset to default values</button>
+        </div>
+      </form>
+      <div class="pill" style="margin-top:6px;">
+        Changes apply on restart. Name/password are stored in the server config (not env) so they stay in sync with the running server.
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Restore</div>
+            <form action="/action/restore" method="post" class="stack">
+              {{ $.CSRFField }}
+              <select id="restore-select" name="name" style="padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+                {{ range .Backups }}
+                  <option value="{{ .Key }}">{{ .Key }} ({{ .LastModified.Format "2006-01-02 15:04" }})</option>
+                {{ end }}
+              </select>
+              <button type="submit" class="danger">Restore</button>
+              <button type="button" id="preview-backup">Preview</button>
+              <label class="mode-toggle">
+                <input type="checkbox" name="backup_before" value="true" checked />
+                <span>Backup before restore</span>
+              </label>
+            </form>
+      <div id="backup-contents" class="pill" style="margin-top:8px; display:none; white-space:pre-wrap;"></div>
+            <form action="/action/upload" method="post" enctype="multipart/form-data" class="stack" style="margin-top:10px;">
+              {{ $.CSRFField }}
+              <input type="file" name="file" required />
+              <label class="mode-toggle">
+                <input type="checkbox" name="backup_before" value="true" checked />
+                <span>Backup before restore</span>
+              </label>
+              <button type="submit" class="danger">Upload + Restore</button>
+            </form>
+          </div>
+    <script>
+      (function() {
+        const previewBtn = document.getElementById('preview-backup');
+        const select = document.getElementById('restore-select');
+        const output = document.getElementById('backup-contents');
+        if (!previewBtn || !select || !output) return;
+        previewBtn.addEventListener('click', async () => {
+          const name = select.value;
+          if (!name) {
+            output.style.display = 'block';
+            output.textContent = 'No backup selected.';
+            return;
+          }
+          output.style.display = 'block';
+          output.textContent = 'Loading preview...';
+          try {
+            const resp = await fetch('/backup/preview?name=' + encodeURIComponent(name));
+            if (!resp.ok) {
+              output.textContent = 'Preview failed.';
+              return;
+            }
+            const data = await resp.json();
+            const items = Array.isArray(data.will_replace) ? data.will_replace : [];
+            if (!items.length) {
+              output.textContent = 'No files listed.';
+              return;
+            }
+            const build = data.game_build || 'unknown';
+            const currentBuild = data.current_game_build || 'unknown';
+            const compatibility = data.build_compatibility || (data.legacy ? 'legacy backup' : 'unknown');
+            output.textContent = [
+              'Validation: passed',
+              'Backup build: ' + build,
+              'Current build: ' + currentBuild,
+              'Compatibility: ' + compatibility,
+              '',
+              'Files that will be replaced:',
+              ...items,
+            ].join('\n');
+          } catch (err) {
+            output.textContent = 'Preview failed.';
+          }
+        });
+      })();
+      (function() {
+        const form = document.getElementById('groups-form');
+        if (!form) return;
+        form.addEventListener('submit', (e) => {
+          const fields = ['group_admin','group_friend','group_guest','group_visitor'];
+          const values = [];
+          fields.forEach(name => {
+            const el = form.querySelector('[name=\"' + name + '\"]');
+            const v = (el && el.value || '').trim();
+            if (v) values.push(v);
+          });
+          const unique = new Set(values);
+          if (values.length > unique.size) {
+            e.preventDefault();
+            alert('Group passwords must be unique. Please use different passwords for each group.');
+          }
+        });
+      })();
+      (function() {
+        const btn = document.getElementById('reset-defaults');
+        const form = btn ? btn.closest('form') : null;
+        if (!btn || !form) return;
+        const setVal = (name, value) => {
+          const el = form.querySelector('[name="' + name + '"]');
+          if (!el) return;
+          if (el.type === 'checkbox') {
+            el.checked = value === true || value === 'true';
+          } else {
+            el.value = value;
+          }
+        };
+        btn.addEventListener('click', () => {
+          const defaults = {
+            slot_count: 16,
+            voice_chat_mode: 'Proximity',
+            enable_voice_chat: true,
+            enable_text_chat: true,
+            game_settings_preset: 'Default',
+            day_time_minutes: 30,
+            night_time_minutes: 12,
+            gs_playerHealthFactor: '1',
+            gs_playerStaminaFactor: '1',
+            gs_enableDurability: true,
+            gs_enableStarvingDebuff: false,
+            gs_foodBuffDurationFactor: '1',
+            gs_shroudTimeFactor: '1',
+            gs_tombstoneMode: 'AddBackpackMaterials',
+            gs_weatherFrequency: 'Normal',
+            gs_enemyDamageFactor: '1',
+            gs_enemyHealthFactor: '1',
+            gs_enemyPerceptionRangeFactor: '1',
+            gs_randomSpawnerAmount: 'Normal',
+            gs_aggroPoolAmount: 'Normal',
+            gs_pacifyAllEnemies: false,
+            gs_tamingStartleRepercussion: 'LoseSomeProgress',
+            gs_miningDamageFactor: '1',
+            gs_resourceDropStackAmountFactor: '1',
+            gs_plantGrowthSpeedFactor: '1',
+            gs_factoryProductionSpeedFactor: '1',
+            gs_perkUpgradeRecyclingFactor: '0.5',
+            gs_perkCostFactor: '1',
+            gs_experienceCombatFactor: '1',
+            gs_experienceMiningFactor: '1',
+            gs_experienceExplorationQuestsFactor: '1',
+          };
+          Object.keys(defaults).forEach(k => setVal(k, defaults[k]));
+          alert('Default values applied. Click "Save + Restart" to apply.');
+        });
+      })();
+    </script>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Savegame Import / Export</div>
+      <ul class="howto">
+        <li>Export: click <strong>Backup Now</strong> (or wait for the schedule). Backups are stored in the S3/MinIO bucket.</li>
+        <li>Download: use the Backups table or the MinIO console (port 9001) with your bucket credentials.</li>
+        <li>Import: upload a <code>.tar.gz</code> or <code>.zip</code> of your savegame folder (files at archive root). The server stops, restores, and restarts.</li>
+        <li>Tip: take a fresh backup before restore and avoid restores while players are online.</li>
+      </ul>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="title">Access Groups</div>
+      <form id="groups-form" action="/action/groups" method="post">
+        {{ .CSRFField }}
+        <input type="password" name="group_admin" placeholder="Admin group password (optional)" />
+        <input type="password" name="group_friend" placeholder="Friend group password (recommended)" />
+        <input type="password" name="group_guest" placeholder="Guest group password (optional)" />
+        <input type="password" name="group_visitor" placeholder="Visitor group password (optional)" />
+        <button type="submit" class="danger">Save + Restart</button>
+      </form>
+      <div class="pill" style="margin-top:6px;">
+        Leave fields blank to keep them unchanged. Players typically join with the Friend group password.
+        Passwords must be unique across groups.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="title">Backups</div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Validate</th><th>Download</th></tr></thead>
+          <tbody>
+          {{ if .Backups }}
+            {{ range .Backups }}
+              <tr>
+                <td>{{ .Key }}</td>
+                <td>{{ formatBytes .Size }}</td>
+                <td>{{ .LastModified.Format "2006-01-02 15:04" }}</td>
+                <td><a class="ghost" href="/backup/preview?name={{ .Key }}" target="_blank" rel="noopener">Restore Preview</a></td>
+                <td><a class="ghost" href="/backup/download?name={{ .Key }}">Download</a></td>
+              </tr>
+            {{ end }}
+          {{ else }}
+            <tr><td colspan="5">No backups yet.</td></tr>
+          {{ end }}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {{ end }}
+
+    {{ if .LoggedIn }}
+    <div class="card" style="margin-top:14px;">
+      <div class="title">Steam Authentication</div>
+      {{ if .SteamState }}
+        <div class="status" style="margin-bottom:10px;">
+          {{ if eq .SteamState.Mode "user" }}<div class="dot ok"></div>{{ else if eq .SteamState.Mode "anonymous" }}<div class="dot ok"></div>{{ else }}<div class="dot down"></div>{{ end }}
+          <div>
+            <div class="pill status-pill {{ if eq .SteamState.Mode "unset" }}warn{{ end }}">
+              Mode: {{ .SteamState.Mode }}
+              {{ if and (eq .SteamState.Mode "user") .SteamState.Username }} · User: {{ .SteamState.Username }}{{ end }}
+            </div>
+            {{ with .SteamState.LastError }}<div class="pill status-pill warn" style="margin-top:6px;">Last error: {{ . }}</div>{{ end }}
+            {{ if eq .SteamState.Mode "unset" }}<div class="pill status-pill warn" style="margin-top:6px;">Select a login mode to start the server.</div>{{ end }}
+          </div>
+        </div>
+      {{ end }}
+      <form id="steam-mode-form" action="/action/steam-auth" method="post" style="margin-top:10px;">
+        {{ .CSRFField }}
+        <div class="stack" style="margin-bottom:10px;">
+          <label class="mode-toggle">
+            <input type="radio" name="steam_mode" value="anonymous" {{if or (eq .SteamState.Mode "anonymous") (eq .SteamState.Mode "unset")}}checked{{end}} />
+            <span>Anonymous</span>
+          </label>
+          <label class="mode-toggle">
+            <input type="radio" name="steam_mode" value="user" {{if eq .SteamState.Mode "user"}}checked{{end}} />
+            <span>Use Steam login</span>
+          </label>
+        </div>
+        <div id="steam-credentials" {{if or (eq .SteamState.Mode "anonymous") (eq .SteamState.Mode "unset")}}style="display:none"{{end}}>
+          <input type="text" name="steam_username" placeholder="Steam username" value="{{ .SteamState.Username }}" />
+          <input type="password" name="steam_password" placeholder="Steam password" />
+          <input type="text" name="steam_guard" placeholder="Steam Guard code (if prompted)" />
+        </div>
+        <button type="submit">Save and Restart</button>
+        <div class="pill" style="margin-top:6px;">
+          Choose anonymous to clear saved creds, or enter login details (with Guard code) to authenticate. Restart is automatic.
+        </div>
+        {{ if eq .SteamState.Mode "unset" }}<div class="pill" style="margin-top:6px; border-color:#f97316; color:#f97316;">Select a login mode to start the server.</div>{{ end }}
+      </form>
+      <script>
+        (function() {
+          const form = document.getElementById('steam-mode-form');
+          if (!form) return;
+          const radios = form.querySelectorAll('input[name="steam_mode"]');
+          const creds = document.getElementById('steam-credentials');
+          const update = () => {
+            const mode = form.querySelector('input[name="steam_mode"]:checked')?.value || 'anonymous';
+            creds.style.display = mode === 'user' ? 'block' : 'none';
+            ['steam_username','steam_password'].forEach(id => {
+              const input = form.querySelector('[name="' + id + '"]');
+              if (input) input.required = (mode === 'user');
+            });
+          };
+          radios.forEach(r => r.addEventListener('change', update));
+          update();
+          form.addEventListener('submit', () => {
+            const mode = form.querySelector('input[name="steam_mode"]:checked')?.value || 'anonymous';
+            form.action = (mode === 'anonymous') ? '/action/steam-anon' : '/action/steam-auth';
+          });
+        })();
+      </script>
+    </div>
+    {{ end }}
+    <script>
+      if (document.querySelector('[data-active-job="true"]')) {
+        window.setTimeout(() => window.location.reload(), 3000);
+      }
+      document.querySelectorAll('form').forEach((form) => {
+        if (!form.querySelector('button.danger')) return;
+        form.addEventListener('submit', (event) => {
+          if (!window.confirm('Confirm this server-changing action. A backup is recommended before restore or configuration changes.')) {
+            event.preventDefault();
+          }
+        });
+      });
+    </script>
+  </div>
+</body>
+</html>

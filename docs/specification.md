@@ -10,7 +10,7 @@ Primary goal: **extremely easy** for users who can run `docker compose up -d`.
 
 Repository: `JimStroomberg/enshrouded-dedi`
 
-Container registry: Docker Hub org `powermountain` (multi-arch builds run on Docker Hub, triggered from GitHub).
+Container registry: Docker Hub org `powermountain`; GitHub Actions publishes tested AMD64 images.
 
 ## 2. Goals
 
@@ -53,11 +53,14 @@ Compose stack services (single `docker-compose.yml`):
 1. `enshrouded` (game server)
 2. `ui` (web status/admin)
 3. `minio` (S3-compatible storage)
-4. `backup` (optional sidecar job/API used by UI to snapshot/restore files reliably)
+4. `backup` (required job/API service used by the UI)
+5. `controller` (narrow Docker-socket boundary)
+6. `minio-init` (one-shot bucket configuration)
 
 Notes:
 - `ui` must not need direct access to MinIO admin APIs; it should use S3 keys and a dedicated bucket.
-- `ui` and `backup` must be fully multi-arch.
+- All project images are AMD64-only to match the game stack and its tested deployment target.
+- Only `controller` receives the Docker socket. It permits inspect/start/stop/restart for one configured container.
 
 ## 6. Service specs
 
@@ -65,9 +68,7 @@ Notes:
 
 **Responsibilities**
 - Install/Update Enshrouded dedicated server on startup via SteamCMD.
-- Run the server using the selected runtime:
-  - amd64: prefer direct Wine or Proton (choose the most stable approach).
-  - arm64: attempt using box64 + Wine/Proton.
+- Run the Windows dedicated server with Wine on AMD64.
 - Persist server install and savegames.
 
 **Networking (must match compose)**
@@ -82,7 +83,7 @@ Expose and document these ports (both UDP and TCP) in compose:
   - Must contain a dedicated `savegame` directory.
 
 **Environment variables (compose-driven)**
-- Provide first-boot defaults for server settings (e.g., `SERVER_NAME`, `SERVER_PASSWORD`, `MAX_PLAYERS`, `SAVE_DIR`). After first boot, runtime values are stored in `enshrouded_server.json` and edited via the UI, not overwritten by env on restart.
+- Provide first-boot defaults for non-secret server settings (for example `SERVER_NAME`, `MAX_PLAYERS`, and `SAVE_DIR`). Access-group passwords and later runtime values are stored in `enshrouded_server.json` and edited via the UI, not overwritten by env on restart.
 - Networking/env still configure ports and basics: `GAME_PORT` (default 15636), `QUERY_PORT` (default 15637), `SAVE_DIR` (default `/data/savegame`), `TZ`.
 
 **Entrypoint behavior**
@@ -94,8 +95,7 @@ Expose and document these ports (both UDP and TCP) in compose:
 4. Start server using values from the persisted config (name/password/slots), not re-applying env overrides on every restart.
 
 **Health check**
-- Implement a basic health check that confirms the server process is running.
-- If possible, add a UDP/TCP port listen check.
+- Require a valid A2S/query response from the configured query port, not only a running process.
 
 **Logging**
 - Logs must go to stdout/stderr.
@@ -130,8 +130,10 @@ Expose and document these ports (both UDP and TCP) in compose:
 - Password changes require compose change + restart.
 
 **Implementation constraints**
-- Must be lightweight and multi-arch.
-- Should not require a database; use in-memory sessions or signed cookies.
+- Must be lightweight and AMD64-compatible.
+- Must not require a database; use signed and encrypted cookies.
+- Enforce CSRF protection, login throttling, constant-time credential checks, secure-cookie configuration, and HTTP timeouts.
+- Never render current game passwords back into HTML or status JSON.
 - UI may call:
   - backup service over internal network
   - MinIO S3 using access key/secret
@@ -157,17 +159,15 @@ Expose and document these ports (both UDP and TCP) in compose:
 
 ### 6.4 Backup service (`backup`)
 
-Implement one of the following (choose the simplest that meets requirements):
-
-Option A (preferred): a small HTTP API service that:
+Implement a small authenticated HTTP API service that:
 - Knows where savegames live (`/data/savegame`)
 - Can create a consistent snapshot (tar/zip) with timestamped name
 - Uploads to S3 bucket
 - Lists available backups
 - Restores a backup to the save dir
 - Accepts an uploaded zip/tar and restores it
-
-Option B: CLI-only sidecar + UI calls it via `docker exec` (less preferred)
+- Runs long changes as serialized background jobs with status and audit records
+- Exposes liveness, dependency readiness, restore preview, diagnostics, and metrics
 
 **Retention policy**
 - Implement default retention (documented and configurable):
@@ -177,8 +177,11 @@ Option B: CLI-only sidecar + UI calls it via `docker exec` (less preferred)
 - Provide env vars to change these.
 
 **Safety**
-- Restore must stop the game server first, restore files, then restart.
-- Must validate uploaded archive content (prevent path traversal).
+- Snapshot must stop the game only for the staging copy, then restart before compression/upload.
+- Archives must carry a versioned manifest, game build, file sizes, and SHA-256 checksums.
+- Restore must fully download, extract, and validate before stopping the game.
+- Apply restore with an atomic save swap, retained pre-restore directory, health wait, and automatic rollback.
+- Reject traversal, symlinks, duplicate paths, excessive files/bytes, and incomplete save pairs.
 
 ## 7. Repository layout
 
@@ -194,6 +197,8 @@ suggested top-level structure:
 │  ├─ ui/
 │  │  ├─ Dockerfile
 │  │  └─ ...
+│  ├─ controller/
+│  │  └─ Dockerfile
 │  └─ backup/
 │     ├─ Dockerfile
 │     └─ ...
@@ -209,7 +214,7 @@ suggested top-level structure:
 
 ### 8.1 Builds
 
-- Images target `linux/amd64` only. Buildx is optional.
+- Images target `linux/amd64` only and are built with Buildx in CI.
 
 ### 8.2 Base images
 
@@ -248,19 +253,21 @@ README must instruct:
 
 - GitHub repo is the source of truth.
 
-### 10.2 Docker Hub builds (required)
+### 10.2 Published images
 
-- Use Docker Hub automated builds (or build hooks) to produce multi-arch images under:
+- GitHub Actions produces AMD64 images under:
   - `powermountain/enshrouded-dedi-server`
   - `powermountain/enshrouded-dedi-ui`
   - `powermountain/enshrouded-dedi-backup`
+  - `powermountain/enshrouded-dedi-controller`
 
 ### 10.3 GitHub workflow triggers
 
 - GitHub Actions should:
   - lint/validate compose
   - run basic tests (UI/backup unit tests)
-  - on tag creation, trigger Docker Hub build (via webhook or Docker Hub API)
+- publish immutable commit tags from `main` and version tags from semantic Git tags
+- run race tests, coverage, vet, vulnerability checks, ShellCheck, Compose validation, image builds, and an isolated restore drill before publishing
 
 ## 11. Documentation requirements (README is critical)
 
@@ -280,7 +287,7 @@ README must be extremely clear and include:
 6. **Data persistence**:
    - which volumes matter
    - how to migrate to a new host
-7. **ARM64 notes**:
+7. **AMD64-only platform notes**:
    - tested platforms
    - expected limitations
    - troubleshooting steps
@@ -304,7 +311,7 @@ README must be extremely clear and include:
    - restore backup
    - upload save archive and restore
 5. Backups are stored in MinIO bucket and retention default is applied.
-6. Images are published as multi-arch on Docker Hub.
+6. All four project images are published for AMD64 with immutable tags on Docker Hub.
 
 ## 13. Implementation notes (guidance for Codex)
 

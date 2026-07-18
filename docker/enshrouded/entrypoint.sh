@@ -2,8 +2,11 @@
 # Avoid exiting on non-zero steamcmd to prevent restart loops; handle errors manually.
 set -uo pipefail
 
-STEAMCMD_DIR="/opt/steamcmd"
-STEAMCMD_WIN="/opt/steamcmd_win/steamcmd.exe"
+STEAMCMD_SEED="/opt/steamcmd"
+STEAMCMD_DIR="/data/steamcmd"
+STEAMCMD_WIN_SEED="/opt/steamcmd_win"
+STEAMCMD_WIN_DIR="/data/steamcmd_win"
+STEAMCMD_WIN="$STEAMCMD_WIN_DIR/steamcmd.exe"
 SERVER_DIR="/data/server"
 SAVE_DIR_DEFAULT="${SAVE_DIR:-/data/savegame}"
 LOG_DIR="/data/logs"
@@ -22,12 +25,18 @@ export WINEDEBUG=-all
 export WINEPREFIX=/data/wine
 export DISPLAY=:1
 
-mkdir -p "$STEAMCMD_DIR" "$SERVER_DIR" "$SAVE_DIR_DEFAULT" "$LOG_DIR" "$STEAM_HOME/.steam" "$STEAM_HOME/.local/share/Steam"
+mkdir -p "$STEAMCMD_DIR" "$STEAMCMD_WIN_DIR" "$SERVER_DIR" "$SAVE_DIR_DEFAULT" "$LOG_DIR" "$STEAM_HOME/.steam" "$STEAM_HOME/.local/share/Steam"
+if [ ! -x "$STEAMCMD_DIR/steamcmd.sh" ]; then
+  cp -a "$STEAMCMD_SEED/." "$STEAMCMD_DIR/"
+fi
+if [ ! -f "$STEAMCMD_WIN" ]; then
+  cp -a "$STEAMCMD_WIN_SEED/." "$STEAMCMD_WIN_DIR/"
+fi
 # Ensure steam user home points to persistent Steam data to keep sentry/guard tokens.
-if [ ! -e /home/steam/.steam ]; then
+if [ ! -L /home/steam/.steam ]; then
   ln -sf "$STEAM_HOME/.steam" /home/steam/.steam
 fi
-if [ ! -e /home/steam/.local/share/Steam ]; then
+if [ ! -L /home/steam/.local/share/Steam ]; then
   mkdir -p /home/steam/.local/share
   ln -sf "$STEAM_HOME/.local/share/Steam" /home/steam/.local/share/Steam
 fi
@@ -41,6 +50,18 @@ load_steam_auth() {
   if [ -f "$STEAM_AUTH_FILE" ]; then
     # shellcheck disable=SC1090
     set -a && source "$STEAM_AUTH_FILE" && set +a
+    if [ -n "${STEAM_USERNAME_B64:-}" ]; then
+      STEAM_USERNAME=$(printf '%s' "$STEAM_USERNAME_B64" | base64 -d)
+      export STEAM_USERNAME
+    fi
+    if [ -n "${STEAM_PASSWORD_B64:-}" ]; then
+      STEAM_PASSWORD=$(printf '%s' "$STEAM_PASSWORD_B64" | base64 -d)
+      export STEAM_PASSWORD
+    fi
+    if [ -n "${STEAM_GUARD_CODE_B64:-}" ]; then
+      STEAM_GUARD_CODE=$(printf '%s' "$STEAM_GUARD_CODE_B64" | base64 -d)
+      export STEAM_GUARD_CODE
+    fi
   fi
 }
 
@@ -139,7 +160,7 @@ update_server() {
       rm -f "$RATE_LIMIT_FILE"
       if [ -n "${STEAM_GUARD_CODE:-}" ] && [ -f "$STEAM_AUTH_FILE" ]; then
         # Guard code is one-time; drop it after a successful login to avoid repeated 2FA prompts.
-        sed -i '/^STEAM_GUARD_CODE=/d' "$STEAM_AUTH_FILE" || true
+        sed -i -e '/^STEAM_GUARD_CODE=/d' -e '/^STEAM_GUARD_CODE_B64=/d' "$STEAM_AUTH_FILE" || true
         unset STEAM_GUARD_CODE
         echo "[enshrouded] cleared one-time Steam Guard code after successful login."
       fi

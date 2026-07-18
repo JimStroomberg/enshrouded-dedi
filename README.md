@@ -1,85 +1,96 @@
 # Enshrouded Dedicated Server Stack
 
-One-command Docker Compose stack to run an Enshrouded dedicated server with:
-- Wine-based server container (amd64).
-- Minimal Go admin UI (login-protected) to restart/update, trigger backups, restore, upload saves, and download logs.
-- Backup sidecar with scheduled + manual backups to MinIO (S3-compatible) and retention (14 daily / 8 weekly / 12 monthly by default).
-- MinIO for bundled S3 storage (versioning on, retention ready).
+An AMD64 Docker Compose stack for Enshrouded with a Wine/SteamCMD game server, a lightweight admin UI, transactional backups, bundled MinIO storage, and a narrow Docker controller.
+
+The stack is intentionally single-host and database-free. It prioritizes preserving an existing world, reproducible deployments, and recoverable operations.
 
 ## Quickstart
-1) `cp .env.example .env` and replace every value marked `change-me`. Configure the Friend access-group password in the UI after first start.
-2) Run `docker compose up -d`.  
-3) Visit `http://localhost:8080` for status; log in with the admin creds to manage the server.
 
-## Stack
-- `enshrouded`: SteamCMD auto-update on start (`app_update 2278520 validate`), runs `enshrouded_server.exe` via Wine. Ports are pre-mapped (UDP/TCP 15636, 15637). Data volume `enshrouded_data` holds install, saves, logs.
-- `backup`: Go HTTP API on `:7000` (internal). Creates scheduled backups (default every 24h), manual backups, restore (stops container, restores, restarts), validates archives to avoid path traversal, retention pruning (14/8/12). Uses Docker socket to restart/update the game container.
-- `ui`: Go web UI on `:8080`. Public status page + admin login. Actions: restart/update, backup now, restore backup, upload+restore save archive, download logs, list backups.
-- `minio`: S3-compatible storage; console bound to `127.0.0.1:9001` by default. `minio-init` bootstraps bucket + versioning + retention rule.
+1. Copy the example configuration: `cp .env.example .env`.
+2. Replace every `change-me` value. Keep `ALLOW_INSECURE_DEFAULTS=false`.
+3. Generate independent random values for the session, CSRF, internal API, Docker-controller, and MinIO secrets. `UI_SESSION_ENCRYPTION_KEY` must be exactly 32 characters.
+4. Start the stack: `docker compose up -d`.
+5. Open `http://localhost:8080`, sign in, and set the Friend access password in Server Settings.
+
+The services reject known default credentials at startup. The admin UI is HTTP by default; restrict it with a firewall or place it behind an HTTPS reverse proxy before exposing it outside a trusted network. Set `UI_SECURE_COOKIES=true` when the browser reaches it over HTTPS.
+
+## Services
+
+- `enshrouded`: AMD64 Wine server. SteamCMD updates on startup and runs from the persistent data volume so the container root filesystem remains read-only.
+- `backup`: authenticated internal API for jobs, transactional snapshot/restore, retention, readiness, diagnostics, audit events, metrics, and notifications.
+- `ui`: public server status plus a login-protected operator interface. State-changing forms use CSRF protection.
+- `controller`: exposes only inspect/start/stop/restart for the configured game container; the UI and backup services never receive the raw Docker socket.
+- `minio` and `minio-init`: bundled S3-compatible storage with bucket versioning and lifecycle configuration.
 
 ## Ports
-- Game: `15636/udp` + `15636/tcp`
-- Query: `15637/udp` + `15637/tcp`
-- UI: `8080` (HTTP)
-- MinIO console: `127.0.0.1:9001` (optional; not exposed publicly by default)
 
-## Key environment variables
-Copy `.env.example` and adjust:
-- Server (initial defaults): `SERVER_NAME`, `MAX_PLAYERS`, `GAME_PORT`, `QUERY_PORT`, `SAVE_DIR`, `TZ`, `UPDATE_ON_START` (true/false). Runtime values, including access-group passwords, are stored in `enshrouded_server.json` and managed via the UI.
-- Steam download: default is anonymous. If you see `Failed to install app '2278520' (No subscription)` or Steam Guard prompts, use the UI “Steam Login” form (admin only) to save your Steam credentials (and Guard code) to the shared volume, then restart the server from the UI. You can also set `STEAM_USERNAME`/`STEAM_PASSWORD`/`STEAM_GUARD_CODE` in `.env` if you prefer.
-- UI: `UI_ADMIN_USERNAME`, `UI_ADMIN_PASSWORD`, `UI_SESSION_SECRET` (long random), `STACK_NAME`.
-- Backup: `BACKUP_INTERVAL_HOURS` (default 24), `BACKUP_RETENTION_DAILIES`/`WEEKLIES`/`MONTHLIES`, `BACKUP_SAVE_DIR`, explicit config/log/auth paths (`BACKUP_SERVER_CONFIG_PATH`, `BACKUP_SERVER_CONFIG_TXT_PATH`, `BACKUP_LOG_DIR`, `BACKUP_STEAM_AUTH_FILE`), restore limits (`BACKUP_MAX_EXTRACT_FILES`, `BACKUP_MAX_EXTRACT_BYTES`), `BACKUP_BIND_ADDR`, `ENSHROUDED_CONTAINER_NAME` (default `enshrouded`), S3 settings (`BACKUP_S3_*`).
-- MinIO: `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET` (default `enshrouded-backups`), `MINIO_RETENTION_DAYS` (for bucket ILM), `MINIO_REGION`.
+- Game: `GAME_HOST_PORT` → `GAME_PORT`, UDP and TCP; default `15636`.
+- Query/A2S: `QUERY_HOST_PORT` → `QUERY_PORT`, UDP and TCP; default `15637`.
+- Admin UI: `UI_HOST_BIND:UI_HOST_PORT`; default `0.0.0.0:8080`.
+- MinIO console: `MINIO_CONSOLE_HOST_BIND:MINIO_CONSOLE_HOST_PORT`; default `127.0.0.1:9001`.
 
-## Admin UI usage
-- Public status at `http://localhost:8080`.
-- Log in with `UI_ADMIN_USERNAME` / `UI_ADMIN_PASSWORD`. Sessions expire after 24h by default (`UI_SESSION_HOURS`).
-- Status shows current server state plus live player count (via A2S on the query port).
-- Admin actions:
-  - Restart or “trigger update” (restart → SteamCMD runs on start).
-  - Backup now.
-  - Restore a selected backup.
-  - Upload a save archive (tar.gz) → restore.
-  - Download latest logs.
-  - Update server access group passwords (Admin/Friend/Guest/Visitor).
-  - Download backup archives and preview contents before restore.
-  - Edit server settings (name, friend/server password, max players, voice/text chat toggles, voice chat mode, game settings preset, day/night durations, tags) directly from the UI; the form always reflects the live `enshrouded_server.json`.
+Only forward the game and query ports for players. The backup API, controller, and MinIO API stay on the internal Compose network.
 
-## Backups & retention
-- Scheduled backup every `BACKUP_INTERVAL_HOURS` (24 by default) plus manual trigger.
-- Backups briefly stop the game only while save/config files are copied to a consistent staging snapshot; the game restarts before compression and upload.
-- New archives include the savegame, server configuration, game build, and a SHA-256 manifest. Legacy save-only archives remain restorable.
-- Stored in MinIO bucket `enshrouded-backups` (configurable) with versioning on.
-- Retention: keep last 14 daily, 8 weekly, 12 monthly backups (configurable). Extra backups are pruned after each new backup; archives with unknown names are retained rather than deleted.
-- Restore validates and stages the full archive before stopping the game, keeps the previous save/config as a rollback, and automatically restores it if the new save does not become healthy.
-- Upload/restore accepts `.tar.gz` and `.zip` archives; contents should be at the archive root.
+## Admin UI
 
-## Data persistence
-- `enshrouded_data`: game install, configs, savegames, logs.
-- `minio_data`: MinIO data.
-- To migrate to a new host: stop the stack, copy volumes (or MinIO bucket), start on the new host with the same `.env`.
+After login, the UI provides:
+
+- restart and Steam update jobs;
+- consistent backup creation, download, upload, preview, and transactional restore;
+- exact restore-file and game-build compatibility previews;
+- server settings and access-group password changes without echoing current passwords into HTML;
+- recent queued/running/succeeded/failed operations, latest backup metadata, and next scheduled backup;
+- redacted diagnostics and server log downloads.
+
+Long operations run through a serialized background queue. The audit trail is stored at `BACKUP_AUDIT_PATH` in the persistent game volume.
+
+## Backups and recovery
+
+Backups briefly stop the game only while save/config files are copied to staging. Compression and S3 upload happen after the game restarts. New archives contain:
+
+- the complete save directory;
+- `enshrouded_server.json` and launch configuration when present;
+- game build and archive schema metadata;
+- per-file size and SHA-256 checksums.
+
+Restore downloads, extracts, and validates the complete archive before stopping the game. It atomically swaps the save, keeps the previous files as a rollback, waits for an A2S-backed healthy state, and automatically rolls back if startup fails. Legacy `.tar.gz`, `.tgz`, and `.zip` save archives remain supported.
+
+Default retention is 14 daily, 8 weekly, and 12 monthly backups. Unrecognized S3 objects are never deleted by retention. Run the isolated recovery proof with `./scripts/restore-drill.sh`; it uses disposable Docker/MinIO volumes and never touches the live world.
+
+Bundled MinIO protects against bad restores and operator mistakes on the same host. For host/storage loss, configure `BACKUP_S3_*` for an off-host S3-compatible provider or replicate the MinIO bucket. See [operations.md](docs/operations.md).
+
+## Operations and optional controls
+
+- `BACKUP_RESTART_REQUIRE_EMPTY=true` defers restart, update, and config jobs while A2S reports players online.
+- `BACKUP_MAINTENANCE_WINDOW=HH:MM-HH:MM` restricts update jobs to that window in `TZ`; overnight windows are supported.
+- `BACKUP_NOTIFICATION_WEBHOOK_URL` receives JSON job completion/failure events.
+- `BACKUP_PLAYER_NOTIFICATIONS=true` also emits online/offline transitions.
+- `/metrics` on the internal backup API exposes Prometheus text metrics and requires the internal bearer token.
+- Host binds, ports, Compose project name, and controlled game-container name are configurable for multiple instances.
+
+## Data and migration
+
+- `enshrouded_data`: game install, Steam/Wine state, savegames, config, audit log, and staged uploads.
+- `minio_data`: bundled object storage.
+
+For migration, take and verify a fresh backup, stop the stack, copy both volumes or the game volume plus off-host bucket, copy the `.env` securely, and start the same immutable image versions on the new host.
 
 ## Platform support
-- AMD64 only (`linux/amd64`). Build and run on an x86_64 host (or via Docker Desktop’s amd64 emulation if you just need to build on an ARM Mac). ARM images and box64/qemu shims have been removed due to instability.
 
-## Running multiple stacks on one host
-- Change `GAME_PORT`/`QUERY_PORT` (and host port mappings) per stack.
-- Use a unique compose project name (`COMPOSE_PROJECT_NAME`) to avoid volume name collisions.
+The game stack is AMD64 only (`linux/amd64`). ARM64 game-server support and host emulation are intentionally out of scope. Docker Desktop can build under emulation, but the final game/Wine smoke test belongs on a real x86_64 host.
 
-## Troubleshooting
-- SteamCMD download issues: retry `docker compose up -d --force-recreate enshrouded` (ensures `app_update 2278520 validate` runs).
-- Wine/arm64 failures: confirm box64/qemu availability; see ARM64 notes above.
-- Permissions on mounted host dirs: ensure the host path is writable by the container user (steam, UID/GID default).
-- Backups not showing: check `backup` logs and MinIO bucket; verify S3 creds match `.env`.
-- Logs: use the UI “Download Logs” or `docker compose logs -f enshrouded backup ui`.
+## Multiple instances
 
-## CI/CD and publishing
-- GitHub Actions (`.github/workflows/ci.yml`) validates Compose, runs formatting, race-enabled tests, coverage, vet, `govulncheck`, and the disposable restore drill before building all three AMD64 images.
-- Commits on `main` publish immutable `main-<commit>` tags in addition to `latest`; production should use the immutable tag recorded in the deployment log.
-- Go, GitHub Actions, Debian, MinIO, and MinIO Client inputs are version/digest pinned. Dependabot proposes reviewed updates for Go modules, Actions, and Dockerfiles.
+Use a unique `COMPOSE_PROJECT_NAME`, `ENSHROUDED_CONTAINER_NAME`, host game/query ports, UI port, and MinIO console port for each instance. Keep internal `GAME_PORT` and `QUERY_PORT` consistent with the game config and `BACKUP_A2S_ADDR`.
 
-## Spec reference
-See `docs/specification.md` for the full goals, non-goals, and acceptance criteria.
+## CI/CD
 
-## Roadmap
-See `ROADMAP.md` for the prioritized reliability, modernization, security, and operations plan.
+GitHub Actions validates formatting, race-enabled tests, a 30% aggregate coverage floor, vet, ShellCheck, Compose, Python healthcheck syntax, `govulncheck`, and the disposable restore drill. It then builds all four AMD64 project images.
+
+`main` publishes `main-<commit>` and `latest`; semantic tags publish `<version>` and `latest`. Production should always use the recorded immutable tag. Dependabot covers Go modules, Actions, and each Dockerfile.
+
+## More documentation
+
+- [Operations, deployment, rollback, and restore drills](docs/operations.md)
+- [Architecture and acceptance criteria](docs/specification.md)
+- [Modernization roadmap and completion record](ROADMAP.md)
