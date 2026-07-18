@@ -117,6 +117,21 @@ func TestBackupClientAddsInternalToken(t *testing.T) {
 	}
 }
 
+func TestFetchBackupsDecodesMinioObjectFields(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `[{"name":"backup-20260718-200000.tar.gz","size":1234,"lastModified":"2026-07-18T20:00:00Z"}]`)
+	})
+	srv := newTestServer(t, upstream)
+	items, err := srv.fetchBackups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Key != "backup-20260718-200000.tar.gz" || items[0].Size != 1234 || items[0].LastModified.IsZero() {
+		t.Fatalf("unexpected backups: %#v", items)
+	}
+}
+
 func TestBackupClientReturnsUpstreamErrorsAndTimeouts(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/slow" {

@@ -85,9 +85,9 @@ type steamState struct {
 }
 
 type backupItem struct {
-	Key          string    `json:"Key"`
-	Size         int64     `json:"Size"`
-	LastModified time.Time `json:"LastModified"`
+	Key          string    `json:"name"`
+	Size         int64     `json:"size"`
+	LastModified time.Time `json:"lastModified"`
 }
 
 type jobView struct {
