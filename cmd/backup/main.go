@@ -30,6 +30,10 @@ import (
 // Config holds env-driven configuration.
 type Config struct {
 	SaveDir             string
+	ServerConfigPath    string
+	ServerConfigTxtPath string
+	LogDir              string
+	SteamAuthFile       string
 	Endpoint            string
 	AccessKey           string
 	SecretKey           string
@@ -182,6 +186,10 @@ func main() {
 
 	cfg := Config{
 		SaveDir:             getenv("BACKUP_SAVE_DIR", "/data/savegame"),
+		ServerConfigPath:    getenv("BACKUP_SERVER_CONFIG_PATH", "/data/server/enshrouded_server.json"),
+		ServerConfigTxtPath: getenv("BACKUP_SERVER_CONFIG_TXT_PATH", "/data/server/server_config.txt"),
+		LogDir:              getenv("BACKUP_LOG_DIR", "/data/server/logs"),
+		SteamAuthFile:       getenv("BACKUP_STEAM_AUTH_FILE", "/data/steam_auth.env"),
 		Endpoint:            endpoint,
 		AccessKey:           getenv("BACKUP_S3_ACCESS_KEY", ""),
 		SecretKey:           getenv("BACKUP_S3_SECRET_KEY", ""),
@@ -370,7 +378,7 @@ func (s *BackupService) handleUploadRestore(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *BackupService) handleLogs(w http.ResponseWriter, r *http.Request) {
-	logDir := filepath.Join(s.cfg.SaveDir, "..", "logs")
+	logDir := s.cfg.LogDir
 	if _, err := os.Stat(logDir); err != nil {
 		respondError(w, http.StatusNotFound, errors.New("no logs found"))
 		return
@@ -706,8 +714,7 @@ func (s *BackupService) lastSteamError() string {
 }
 
 func (s *BackupService) steamAuthPath() string {
-	base := filepath.Dir(s.cfg.SaveDir)
-	return filepath.Join(base, "steam_auth.env")
+	return filepath.Clean(s.cfg.SteamAuthFile)
 }
 
 func (s *BackupService) listBackups(ctx context.Context) ([]minio.ObjectInfo, error) {
@@ -770,16 +777,20 @@ func (s *BackupService) createBackup(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	_, err = s.s3.PutObject(ctx, s.cfg.Bucket, name, tmpFile, stat.Size(), minio.PutObjectOptions{ContentType: "application/gzip"})
+	upload, err := s.s3.PutObject(ctx, s.cfg.Bucket, name, tmpFile, stat.Size(), minio.PutObjectOptions{ContentType: "application/gzip"})
 	if err != nil {
 		return "", err
 	}
+	if upload.Size != stat.Size() {
+		return "", fmt.Errorf("backup upload size mismatch: wrote %d bytes, expected %d", upload.Size, stat.Size())
+	}
 
-	go func() {
-		if err := s.applyRetention(context.Background()); err != nil {
-			s.logger.Printf("retention error: %v", err)
-		}
-	}()
+	if err := s.applyRetention(ctx); err != nil {
+		return "", fmt.Errorf("backup uploaded but retention failed: %w", err)
+	}
+	if _, err := s.s3.StatObject(ctx, s.cfg.Bucket, name, minio.StatObjectOptions{}); err != nil {
+		return "", fmt.Errorf("backup did not remain readable after retention: %w", err)
+	}
 
 	return name, nil
 }
@@ -941,6 +952,10 @@ func (s *BackupService) applyRetention(ctx context.Context) error {
 	for _, obj := range items {
 		ts, err := parseTimestamp(obj.Key)
 		if err != nil {
+			// Never prune objects we cannot classify. This protects manually
+			// uploaded or legacy archives from accidental deletion.
+			keep[obj.Key] = true
+			s.logger.Printf("retention: keeping unrecognized object %s: %v", obj.Key, err)
 			continue
 		}
 		dayKey := ts.Format("2006-01-02")
@@ -982,18 +997,23 @@ func (s *BackupService) applyRetention(ctx context.Context) error {
 
 func parseTimestamp(name string) (time.Time, error) {
 	base := filepath.Base(name)
-	base = strings.TrimSuffix(base, filepath.Ext(base))
-	parts := strings.Split(base, "-")
-	if len(parts) < 2 {
-		return time.Time{}, errors.New("invalid name")
-	}
-	stamp := parts[len(parts)-1]
-	if len(stamp) != len("20060102-150405") {
-		// allow names with prefix like backup-20240101-120000
-		if len(parts) >= 2 {
-			stamp = parts[len(parts)-2] + "-" + parts[len(parts)-1]
+	lower := strings.ToLower(base)
+	matchedSuffix := false
+	for _, suffix := range []string{".tar.gz", ".tgz", ".zip"} {
+		if strings.HasSuffix(lower, suffix) {
+			base = base[:len(base)-len(suffix)]
+			matchedSuffix = true
+			break
 		}
 	}
+	if !matchedSuffix {
+		return time.Time{}, errors.New("unsupported backup extension")
+	}
+	parts := strings.Split(base, "-")
+	if len(parts) < 3 {
+		return time.Time{}, errors.New("invalid name")
+	}
+	stamp := parts[len(parts)-2] + "-" + parts[len(parts)-1]
 	return time.Parse("20060102-150405", stamp)
 }
 
@@ -1391,7 +1411,7 @@ func (s *BackupService) ensureSaveDir() error {
 }
 
 func (s *BackupService) updateGroupPasswords(updates map[string]string) error {
-	cfgPath := filepath.Clean(filepath.Join(s.cfg.SaveDir, "..", "server", "enshrouded_server.json"))
+	cfgPath := s.serverConfigPath()
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return err
@@ -1450,11 +1470,11 @@ func (s *BackupService) updateGroupPasswords(updates map[string]string) error {
 }
 
 func (s *BackupService) serverConfigPath() string {
-	return filepath.Clean(filepath.Join(s.cfg.SaveDir, "..", "server", "enshrouded_server.json"))
+	return filepath.Clean(s.cfg.ServerConfigPath)
 }
 
 func (s *BackupService) serverConfigTxtPath() string {
-	return filepath.Clean(filepath.Join(s.cfg.SaveDir, "..", "server", "server_config.txt"))
+	return filepath.Clean(s.cfg.ServerConfigTxtPath)
 }
 
 func (s *BackupService) readServerConfig() (*serverConfigView, error) {
@@ -1644,7 +1664,6 @@ func (s *BackupService) updateServerConfig(p *serverConfigPayload) error {
 				},
 			}
 		}
-		txtUpdates["SERVER_PASSWORD"] = newPass
 	}
 
 	out, err := json.MarshalIndent(doc, "", "  ")
@@ -1692,12 +1711,11 @@ func (s *BackupService) defaultServerConfigDocument() map[string]interface{} {
 func (s *BackupService) updateServerConfigTxt(updates map[string]string) error {
 	cfgPath := s.serverConfigTxtPath()
 	current := map[string]string{
-		"SERVER_NAME":     getenv("SERVER_NAME", "Enshrouded Server"),
-		"SERVER_PASSWORD": getenv("SERVER_PASSWORD", ""),
-		"MAX_PLAYERS":     getenv("MAX_PLAYERS", "16"),
-		"GAME_PORT":       getenv("GAME_PORT", "15636"),
-		"QUERY_PORT":      getenv("QUERY_PORT", "15637"),
-		"SAVE_DIR":        getenv("SAVE_DIR", "/data/savegame"),
+		"SERVER_NAME": getenv("SERVER_NAME", "Enshrouded Server"),
+		"MAX_PLAYERS": getenv("MAX_PLAYERS", "16"),
+		"GAME_PORT":   getenv("GAME_PORT", "15636"),
+		"QUERY_PORT":  getenv("QUERY_PORT", "15637"),
+		"SAVE_DIR":    getenv("SAVE_DIR", "/data/savegame"),
 	}
 	if raw, err := os.ReadFile(cfgPath); err == nil {
 		sc := bufio.NewScanner(bytes.NewReader(raw))
@@ -1719,7 +1737,7 @@ func (s *BackupService) updateServerConfigTxt(updates map[string]string) error {
 		current[k] = v
 	}
 
-	keys := []string{"SERVER_NAME", "SERVER_PASSWORD", "MAX_PLAYERS", "GAME_PORT", "QUERY_PORT", "SAVE_DIR"}
+	keys := []string{"SERVER_NAME", "MAX_PLAYERS", "GAME_PORT", "QUERY_PORT", "SAVE_DIR"}
 	var buf bytes.Buffer
 	for _, k := range keys {
 		if v, ok := current[k]; ok {
