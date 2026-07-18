@@ -30,6 +30,17 @@ Deploy:
 
 The game container is read-only except for `/data` and `/tmp`. SteamCMD, Wine, Steam state, the server installation, and save data all live under `/data`.
 
+## Admin UI login troubleshooting
+
+The admin UI keeps CSRF form-token validation enabled in every mode. In local HTTP mode (`UI_SECURE_COOKIES=false`), it also supports sandboxed webviews that send the opaque `Origin: null`; the form token and CSRF cookie must still match. Parseable cross-origin requests remain rejected.
+
+If login reports `invalid or expired form`:
+
+1. Refresh the page to obtain a new form token.
+2. Confirm the browser reaches the UI over the same HTTP address shown in its address bar.
+3. If an HTTPS reverse proxy is in front of the UI, set `UI_SECURE_COOKIES=true` and preserve the public `Host` header.
+4. Check the UI log's `csrf rejected` reason before changing credentials; CSRF failures occur before username/password validation.
+
 ## Rollback
 
 If the new stack cannot become healthy:

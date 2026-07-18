@@ -255,10 +255,25 @@ func (s *Server) handler() http.Handler {
 	if !s.cfg.SecureCookies {
 		csrfHandler := protected
 		protected = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			csrfHandler.ServeHTTP(w, csrf.PlaintextHTTPRequest(r))
+			csrfHandler.ServeHTTP(w, preparePlaintextCSRFRequest(r))
 		})
 	}
 	return securityHeaders(protected)
+}
+
+// preparePlaintextCSRFRequest keeps Gorilla's token validation enabled while
+// allowing sandboxed local webviews, which serialize their origin as "null".
+// Parseable cross-origin requests still reach Gorilla unchanged and are denied.
+func preparePlaintextCSRFRequest(r *http.Request) *http.Request {
+	plaintext := csrf.PlaintextHTTPRequest(r)
+	if plaintext.Header.Get("Origin") != "null" {
+		return plaintext
+	}
+
+	clone := plaintext.Clone(plaintext.Context())
+	clone.Header = plaintext.Header.Clone()
+	clone.Header.Del("Origin")
+	return clone
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
