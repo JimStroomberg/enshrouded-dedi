@@ -200,7 +200,7 @@ generate_config() {
   fi
   cat >"$cfg" <<CONFIG
 SERVER_NAME=${SERVER_NAME:-Enshrouded Server}
-MAX_PLAYERS=${MAX_PLAYERS:-16}
+MAX_PLAYERS=${MAX_PLAYERS:-8}
 GAME_PORT=${GAME_PORT:-15636}
 QUERY_PORT=${QUERY_PORT:-15637}
 SAVE_DIR=${SAVE_DIR:-/data/savegame}
@@ -218,7 +218,7 @@ run_server() {
   query_port=$(config_get "QUERY_PORT" "${QUERY_PORT:-15637}")
   server_name=$(config_get "SERVER_NAME" "${SERVER_NAME:-Enshrouded Server}")
   save_dir=$(config_get "SAVE_DIR" "${SAVE_DIR:-/data/savegame}")
-  max_players=$(config_get "MAX_PLAYERS" "${MAX_PLAYERS:-16}")
+  max_players=$(config_get "MAX_PLAYERS" "${MAX_PLAYERS:-8}")
 
   local args=("$bin" "-log" "-SteamServerGamePort=${game_port}" "-SteamServerQueryPort=${query_port}" "-ServerName=${server_name}" "-SaveDirectory=${save_dir}" "-MaxPlayers=${max_players}")
   echo "[enshrouded] launching server via wine"

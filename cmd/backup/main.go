@@ -1754,7 +1754,7 @@ func (s *BackupService) readServerConfig() (*serverConfigView, error) {
 		if os.IsNotExist(err) {
 			return &serverConfigView{
 				Name:               getenv("SERVER_NAME", "Enshrouded Server"),
-				SlotCount:          atoiEnv("MAX_PLAYERS", 16),
+				SlotCount:          atoiEnv("MAX_PLAYERS", 8),
 				GameSettingsPreset: "Default",
 			}, nil
 		}
@@ -1946,7 +1946,7 @@ func (s *BackupService) defaultServerConfigDocument() map[string]interface{} {
 		"logDirectory":       "./logs",
 		"ip":                 "0.0.0.0",
 		"queryPort":          atoiEnv("QUERY_PORT", 15637),
-		"slotCount":          atoiEnv("MAX_PLAYERS", 16),
+		"slotCount":          atoiEnv("MAX_PLAYERS", 8),
 		"tags":               []string{},
 		"voiceChatMode":      "Proximity",
 		"enableVoiceChat":    true,
@@ -1970,7 +1970,7 @@ func (s *BackupService) updateServerConfigTxt(updates map[string]string) error {
 	cfgPath := s.serverConfigTxtPath()
 	current := map[string]string{
 		"SERVER_NAME": getenv("SERVER_NAME", "Enshrouded Server"),
-		"MAX_PLAYERS": getenv("MAX_PLAYERS", "16"),
+		"MAX_PLAYERS": getenv("MAX_PLAYERS", "8"),
 		"GAME_PORT":   getenv("GAME_PORT", "15636"),
 		"QUERY_PORT":  getenv("QUERY_PORT", "15637"),
 		"SAVE_DIR":    getenv("SAVE_DIR", "/data/savegame"),
