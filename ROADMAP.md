@@ -41,7 +41,7 @@ Status: complete
 
 ## Phase 3 — Admin/control-plane hardening
 
-Status: implemented; live verification is part of the final rollout
+Status: complete and verified on GS2
 
 - CSRF protection on every state-changing form.
 - Constant-time login checks and per-IP throttling.
@@ -66,7 +66,7 @@ Status: complete for the current single-binary architecture
 
 ## Phase 5 — Operations and user experience
 
-Status: implemented; live verification is part of the final rollout
+Status: complete and verified on GS2
 
 - Serialized background jobs expose queued/running/succeeded/failed states, IDs, durations, results, and sanitized errors.
 - The UI shows recent jobs, latest backup metadata, checksum presence, and next scheduled backup.
@@ -89,15 +89,16 @@ Status: complete as configurable features
 
 ## Final release gate
 
-Status: in progress
+Status: complete
 
-1. Merge the hardening/operations checkpoint and wait for all four immutable images.
-2. Take and independently verify a fresh live backup.
-3. Generate non-default production control-plane/MinIO secrets without exposing them in logs or chat.
-4. Redeploy the full GS2 Portainer stack with the immutable images.
-5. Verify A2S game health, controller narrowing, backup/UI readiness, admin login, queued backup, manifest preview/download, diagnostics redaction, restart persistence, and live world access.
-6. Run the isolated restore drill using the released production image.
-7. Tag and publish `v1.0.0`, then record the deployed tag and rollback image.
+- Hardening and the Portainer/HTTP compatibility follow-up merged through PRs #4 and #5. The live release candidate uses immutable tag `main-7781e48` for all four project images.
+- The final live backup is `backup-20260718-202112.951819598.tar.gz` (12,899,001 bytes; SHA-256 `550d1d156f827700f0756cccc77b9f0a0e80ab533887e215086d504a05a33864`). Its schema-1 manifest, game build `23178631`, 35 file sizes/checksums, required world/character pairs, download, and matching-build restore preview were independently verified.
+- Non-default UI encryption, CSRF, internal API, controller, and MinIO credentials are active. Internal API authentication, controller token enforcement, and the single-container allow-list returned the expected 200/401/404 responses.
+- The image-only Portainer stack is deployed on GS2. Controller, MinIO, game, backup, and UI are healthy; the UI is reachable on port 8555; direct-HTTP CSRF login, security headers, password omission, readiness, and A2S status passed live checks.
+- Diagnostics contained the expected seven files and passed checks against UI, control-plane, S3, Steam, and game-password values. Password fields are omitted from the redacted config.
+- A queued production restart succeeded in 48.5 seconds and returned to A2S build `0.0.15.0`. The user confirmed the recovered world was playable before rollout; post-rollout A2S and live save-pair checks confirm the same persistent world remains mounted.
+- The isolated restore drill ran with the exact `main-7781e48` backup/controller production images, restored the disposable world/config, and retained one pre-restore rollback directory.
+- Release tag: `v1.0.0`. Verified rollback image: `main-7781e48`. Independent recovery artifacts remain in `/home/adminjim`.
 
 ## Explicitly deferred
 
