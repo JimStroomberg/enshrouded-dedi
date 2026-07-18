@@ -9,7 +9,6 @@ services:
     env_file: .env
     environment:
       SERVER_NAME: ${SERVER_NAME}
-      SERVER_PASSWORD: ${SERVER_PASSWORD}
       MAX_PLAYERS: ${MAX_PLAYERS}
       GAME_PORT: ${GAME_PORT}
       QUERY_PORT: ${QUERY_PORT}
@@ -42,6 +41,10 @@ services:
     env_file: .env
     environment:
       BACKUP_SAVE_DIR: ${BACKUP_SAVE_DIR}
+      BACKUP_SERVER_CONFIG_PATH: ${BACKUP_SERVER_CONFIG_PATH:-/data/server/enshrouded_server.json}
+      BACKUP_SERVER_CONFIG_TXT_PATH: ${BACKUP_SERVER_CONFIG_TXT_PATH:-/data/server/server_config.txt}
+      BACKUP_LOG_DIR: ${BACKUP_LOG_DIR:-/data/server/logs}
+      BACKUP_STEAM_AUTH_FILE: ${BACKUP_STEAM_AUTH_FILE:-/data/steam_auth.env}
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
       BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY}
       BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY}

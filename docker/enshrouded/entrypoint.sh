@@ -179,7 +179,6 @@ generate_config() {
   fi
   cat >"$cfg" <<CONFIG
 SERVER_NAME=${SERVER_NAME:-Enshrouded Server}
-SERVER_PASSWORD=${SERVER_PASSWORD:-}
 MAX_PLAYERS=${MAX_PLAYERS:-16}
 GAME_PORT=${GAME_PORT:-15636}
 QUERY_PORT=${QUERY_PORT:-15637}
@@ -193,18 +192,14 @@ run_server() {
     echo "[enshrouded] server binary missing at $bin (run Steam update after login)"
     tail -f /dev/null
   fi
-  local game_port query_port server_name server_password save_dir max_players
+  local game_port query_port server_name save_dir max_players
   game_port=$(config_get "GAME_PORT" "${GAME_PORT:-15636}")
   query_port=$(config_get "QUERY_PORT" "${QUERY_PORT:-15637}")
   server_name=$(config_get "SERVER_NAME" "${SERVER_NAME:-Enshrouded Server}")
-  server_password=$(config_get "SERVER_PASSWORD" "${SERVER_PASSWORD:-}")
   save_dir=$(config_get "SAVE_DIR" "${SAVE_DIR:-/data/savegame}")
   max_players=$(config_get "MAX_PLAYERS" "${MAX_PLAYERS:-16}")
 
   local args=("$bin" "-log" "-SteamServerGamePort=${game_port}" "-SteamServerQueryPort=${query_port}" "-ServerName=${server_name}" "-SaveDirectory=${save_dir}" "-MaxPlayers=${max_players}")
-  if [ -n "$server_password" ]; then
-    args+=("-Password=${server_password}")
-  fi
   echo "[enshrouded] launching server via wine"
   exec "$WINE_BIN" "${args[@]}"
 }
