@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /docker/backup
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /docker/ui
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /docker/enshrouded
+    schedule:
+      interval: weekly

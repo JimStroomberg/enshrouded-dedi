@@ -13,13 +13,13 @@ Updated: 2026-07-18
 
 - The live server is healthy and loads the existing version-12 save.
 - A verified stopped-server ZIP exists outside the Docker volume.
-- The backup retention bug is fixed locally and deployed on GS2 as `backupfix-20260718`.
-- The live backup service successfully created, retained, listed, downloaded, and inspected a MinIO archive.
-- The repository still has the rescue changes uncommitted and the fixed image has not yet been published to Docker Hub.
-- Go baseline: `go 1.22`; current verified toolchain available during this review: Go 1.26.5.
-- Key available updates include MinIO Go `v7.0.69 -> v7.2.1` and Gorilla Sessions `v1.2.2 -> v1.4.0`.
-- `govulncheck` reports no reachable vulnerabilities. It does report an imported `golang.org/x/net` vulnerability fixed in `v0.55.0`, plus older vulnerable modules that are not currently reached by the application.
-- Test coverage is 1.5% for `cmd/backup` and 0% for `cmd/ui`.
+- The rescue fix is merged, published, and deployed on GS2 as immutable image `powermountain/enshrouded-dedi-backup:main-e0531bc`.
+- New backups are consistent, manifest-based snapshots; restore validates before stopping the game and rolls back automatically if the restored server is unhealthy.
+- The disposable Docker/MinIO restore drill runs in CI and verifies save/config checksums plus the retained rollback directory.
+- Go baseline: `go 1.26.0` with the `go1.26.5` toolchain; MinIO Go is `v7.2.1` and Gorilla Sessions is `v1.4.0`.
+- `govulncheck` reports no reachable or imported-package vulnerabilities.
+- Debian, MinIO, MinIO Client, and GitHub Actions are digest/SHA pinned; Dependabot covers Go, Actions, and Docker inputs.
+- Backup safety-test coverage is 25.1%; UI coverage remains the next test-confidence target.
 - `cmd/backup/main.go` and `cmd/ui/main.go` are currently large single-file programs, at roughly 1,850 and 1,475 lines.
 
 ## Phase 0 — Turn the rescue into a reproducible release
