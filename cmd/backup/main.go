@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -34,6 +35,7 @@ type Config struct {
 	ServerConfigTxtPath string
 	LogDir              string
 	SteamAuthFile       string
+	SteamAppManifest    string
 	Endpoint            string
 	AccessKey           string
 	SecretKey           string
@@ -46,6 +48,9 @@ type Config struct {
 	BindAddr            string
 	EnshroudedContainer string
 	LogLevel            string
+	MaxExtractFiles     int
+	MaxExtractBytes     int64
+	HealthTimeout       time.Duration
 }
 
 func getenv(key, def string) string {
@@ -58,6 +63,15 @@ func getenv(key, def string) string {
 func atoiEnv(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return def
+}
+
+func atoi64Env(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return i
 		}
 	}
@@ -173,10 +187,11 @@ func asStringSlice(v interface{}) []string {
 
 // BackupService implements backup/restore endpoints.
 type BackupService struct {
-	cfg    Config
-	s3     *minio.Client
-	docker *dockerClient
-	logger *log.Logger
+	cfg         Config
+	s3          *minio.Client
+	docker      *dockerClient
+	logger      *log.Logger
+	operationMu sync.Mutex
 }
 
 func main() {
@@ -190,6 +205,7 @@ func main() {
 		ServerConfigTxtPath: getenv("BACKUP_SERVER_CONFIG_TXT_PATH", "/data/server/server_config.txt"),
 		LogDir:              getenv("BACKUP_LOG_DIR", "/data/server/logs"),
 		SteamAuthFile:       getenv("BACKUP_STEAM_AUTH_FILE", "/data/steam_auth.env"),
+		SteamAppManifest:    getenv("BACKUP_STEAM_APP_MANIFEST", "/data/server/steamapps/appmanifest_2278520.acf"),
 		Endpoint:            endpoint,
 		AccessKey:           getenv("BACKUP_S3_ACCESS_KEY", ""),
 		SecretKey:           getenv("BACKUP_S3_SECRET_KEY", ""),
@@ -202,6 +218,9 @@ func main() {
 		BindAddr:            getenv("BACKUP_BIND_ADDR", "0.0.0.0:7000"),
 		EnshroudedContainer: getenv("ENSHROUDED_CONTAINER_NAME", "enshrouded"),
 		LogLevel:            strings.ToLower(getenv("BACKUP_LOG_LEVEL", "info")),
+		MaxExtractFiles:     atoiEnv("BACKUP_MAX_EXTRACT_FILES", 10000),
+		MaxExtractBytes:     atoi64Env("BACKUP_MAX_EXTRACT_BYTES", 4<<30),
+		HealthTimeout:       time.Duration(atoiEnv("BACKUP_HEALTH_TIMEOUT_SECONDS", 180)) * time.Second,
 	}
 
 	logger := log.New(os.Stdout, "backup ", log.LstdFlags|log.Lmsgprefix)
@@ -750,12 +769,24 @@ func (s *BackupService) listBackupContents(ctx context.Context, name string) ([]
 }
 
 func (s *BackupService) createBackup(ctx context.Context) (string, error) {
-	ts := time.Now().UTC().Format("20060102-150405")
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	return s.createBackupUnlocked(ctx)
+}
+
+func (s *BackupService) createBackupUnlocked(ctx context.Context) (string, error) {
+	now := time.Now().UTC()
+	ts := now.Format("20060102-150405.000000000")
 	name := fmt.Sprintf("backup-%s.tar.gz", ts)
 
 	if err := s.ensureSaveDir(); err != nil {
 		return "", err
 	}
+	stageDir, err := s.snapshotCurrent(ctx, now)
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(stageDir)
 
 	tmpFile, err := os.CreateTemp("", "enshrouded-backup-*.tar.gz")
 	if err != nil {
@@ -764,7 +795,10 @@ func (s *BackupService) createBackup(ctx context.Context) (string, error) {
 	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
-	if err := archiveDir(s.cfg.SaveDir, tmpFile); err != nil {
+	if err := archiveDir(stageDir, tmpFile); err != nil {
+		return "", err
+	}
+	if err := tmpFile.Sync(); err != nil {
 		return "", err
 	}
 
@@ -776,8 +810,17 @@ func (s *BackupService) createBackup(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	archiveSHA256, err := sha256File(tmpFile.Name())
+	if err != nil {
+		return "", err
+	}
 
-	upload, err := s.s3.PutObject(ctx, s.cfg.Bucket, name, tmpFile, stat.Size(), minio.PutObjectOptions{ContentType: "application/gzip"})
+	opts := minio.PutObjectOptions{
+		ContentType:  "application/gzip",
+		UserMetadata: map[string]string{"sha256": archiveSHA256, "manifest-schema": strconv.Itoa(backupManifestSchema)},
+	}
+	opts.SetMatchETagExcept("*")
+	upload, err := s.s3.PutObject(ctx, s.cfg.Bucket, name, tmpFile, stat.Size(), opts)
 	if err != nil {
 		return "", err
 	}
@@ -788,27 +831,65 @@ func (s *BackupService) createBackup(ctx context.Context) (string, error) {
 	if err := s.applyRetention(ctx); err != nil {
 		return "", fmt.Errorf("backup uploaded but retention failed: %w", err)
 	}
-	if _, err := s.s3.StatObject(ctx, s.cfg.Bucket, name, minio.StatObjectOptions{}); err != nil {
+	stored, err := s.s3.StatObject(ctx, s.cfg.Bucket, name, minio.StatObjectOptions{})
+	if err != nil {
 		return "", fmt.Errorf("backup did not remain readable after retention: %w", err)
+	}
+	if stored.Size != stat.Size() {
+		return "", fmt.Errorf("stored backup size mismatch: got %d bytes, expected %d", stored.Size, stat.Size())
+	}
+	if upload.ETag != "" && stored.ETag != "" && upload.ETag != stored.ETag {
+		return "", fmt.Errorf("stored backup ETag mismatch: got %s, expected %s", stored.ETag, upload.ETag)
 	}
 
 	return name, nil
 }
 
-func (s *BackupService) restoreBackup(ctx context.Context, name string, backupBefore bool) error {
-	if name == "" {
-		return errors.New("backup name required")
+func (s *BackupService) snapshotCurrent(ctx context.Context, now time.Time) (stageDir string, err error) {
+	wasRunning, err := s.containerRunning(ctx)
+	if err != nil {
+		return "", fmt.Errorf("inspect game container before snapshot: %w", err)
 	}
-
-	if err := s.stopContainer(ctx); err != nil {
-		s.logger.Printf("warn: stop container: %v", err)
-	}
-	if backupBefore {
-		if _, err := s.createBackup(ctx); err != nil {
-			_ = s.startContainer(ctx)
-			return err
+	stoppedByUs := false
+	if wasRunning {
+		if err := s.stopContainer(ctx); err != nil {
+			return "", fmt.Errorf("stop game container for snapshot: %w", err)
 		}
+		stoppedByUs = true
 	}
+	defer func() {
+		if !stoppedByUs {
+			return
+		}
+		if startErr := s.startContainer(context.Background()); startErr != nil {
+			err = errors.Join(err, fmt.Errorf("restart game container after snapshot: %w", startErr))
+		}
+	}()
+
+	configFiles := map[string]string{
+		"enshrouded_server.json": s.serverConfigPath(),
+		"server_config.txt":      s.serverConfigTxtPath(),
+	}
+	stageDir, err = createSnapshotStage(s.cfg.SaveDir, configFiles, readSteamBuild(s.cfg.SteamAppManifest), now)
+	if err != nil {
+		return "", err
+	}
+	if wasRunning {
+		if err := s.startContainer(ctx); err != nil {
+			_ = os.RemoveAll(stageDir)
+			return "", fmt.Errorf("restart game container after snapshot: %w", err)
+		}
+		stoppedByUs = false
+	}
+	return stageDir, nil
+}
+
+func (s *BackupService) restoreBackup(ctx context.Context, name string, backupBefore bool) error {
+	if !isSafeBackupName(name) {
+		return errors.New("valid backup name required")
+	}
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 
 	tmpFile, err := os.CreateTemp("", "enshrouded-restore-*.tar.gz")
 	if err != nil {
@@ -823,24 +904,28 @@ func (s *BackupService) restoreBackup(ctx context.Context, name string, backupBe
 	}
 	defer obj.Close()
 
+	stat, err := obj.Stat()
+	if err != nil {
+		return err
+	}
 	if _, err := io.Copy(tmpFile, obj); err != nil {
 		return err
 	}
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+	if downloaded, err := tmpFile.Stat(); err != nil {
 		return err
+	} else if downloaded.Size() != stat.Size {
+		return fmt.Errorf("downloaded backup size mismatch: got %d bytes, expected %d", downloaded.Size(), stat.Size)
 	}
-
-	if err := extractArchive(tmpFile.Name(), s.cfg.SaveDir); err != nil {
-		return err
-	}
-
-	if err := s.startContainer(ctx); err != nil {
-		return err
-	}
-	return nil
+	return s.restoreLocalArchive(ctx, tmpFile.Name(), backupBefore)
 }
 
 func (s *BackupService) uploadAndRestore(ctx context.Context, filename string, r io.Reader, backupBefore bool) error {
+	if !isSafeBackupName(filepath.Base(filename)) {
+		return errors.New("uploaded backup must be a .tar.gz, .tgz, or .zip archive")
+	}
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
 	tmpFile, err := os.CreateTemp("", "enshrouded-upload-*.tar")
 	if err != nil {
 		return err
@@ -851,23 +936,7 @@ func (s *BackupService) uploadAndRestore(ctx context.Context, filename string, r
 	if _, err := io.Copy(tmpFile, r); err != nil {
 		return err
 	}
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-
-	if err := s.stopContainer(ctx); err != nil {
-		s.logger.Printf("warn: stop container: %v", err)
-	}
-	if backupBefore {
-		if _, err := s.createBackup(ctx); err != nil {
-			_ = s.startContainer(ctx)
-			return err
-		}
-	}
-	if err := extractArchive(tmpFile.Name(), s.cfg.SaveDir); err != nil {
-		return err
-	}
-	return s.startContainer(ctx)
+	return s.restoreLocalArchive(ctx, tmpFile.Name(), backupBefore)
 }
 
 func (s *BackupService) startScheduler(ctx context.Context) {
@@ -895,6 +964,18 @@ func (s *BackupService) stopContainer(ctx context.Context) error {
 
 func (s *BackupService) startContainer(ctx context.Context) error {
 	return s.docker.post(ctx, fmt.Sprintf("/containers/%s/start", s.cfg.EnshroudedContainer), nil)
+}
+
+func (s *BackupService) containerRunning(ctx context.Context) (bool, error) {
+	var inspect struct {
+		State struct {
+			Running bool `json:"Running"`
+		} `json:"State"`
+	}
+	if err := s.docker.get(ctx, fmt.Sprintf("/containers/%s/json", s.cfg.EnshroudedContainer), &inspect); err != nil {
+		return false, err
+	}
+	return inspect.State.Running, nil
 }
 
 func (s *BackupService) containerStatus(ctx context.Context) (map[string]interface{}, error) {
@@ -1014,7 +1095,12 @@ func parseTimestamp(name string) (time.Time, error) {
 		return time.Time{}, errors.New("invalid name")
 	}
 	stamp := parts[len(parts)-2] + "-" + parts[len(parts)-1]
-	return time.Parse("20060102-150405", stamp)
+	for _, layout := range []string{"20060102-150405.999999999", "20060102-150405"} {
+		if parsed, err := time.Parse(layout, stamp); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, errors.New("invalid timestamp")
 }
 
 func isSafeBackupName(name string) bool {
@@ -1033,11 +1119,9 @@ func isSafeBackupName(name string) bool {
 
 func archiveDir(root string, w io.Writer) error {
 	gz := gzip.NewWriter(w)
-	defer gz.Close()
 	tw := tar.NewWriter(gz)
-	defer tw.Close()
 
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -1069,6 +1153,9 @@ func archiveDir(root string, w io.Writer) error {
 		}
 		return nil
 	})
+	tarCloseErr := tw.Close()
+	gzipCloseErr := gz.Close()
+	return errors.Join(walkErr, tarCloseErr, gzipCloseErr)
 }
 
 type archiveFormat int
@@ -1079,7 +1166,16 @@ const (
 	archiveZip
 )
 
+type archiveLimits struct {
+	MaxFiles int
+	MaxBytes int64
+}
+
 func extractArchive(path, dest string) error {
+	return extractArchiveWithLimits(path, dest, archiveLimits{MaxFiles: 10000, MaxBytes: 4 << 30})
+}
+
+func extractArchiveWithLimits(path, dest string, limits archiveLimits) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -1092,9 +1188,9 @@ func extractArchive(path, dest string) error {
 	}
 	switch format {
 	case archiveTarGz:
-		return extractTarGz(f, dest)
+		return extractTarGz(f, dest, limits)
 	case archiveZip:
-		return extractZip(f, dest)
+		return extractZip(f, dest, limits)
 	default:
 		return errors.New("unsupported archive format")
 	}
@@ -1118,7 +1214,7 @@ func detectArchiveFormat(f *os.File) (archiveFormat, error) {
 	return archiveUnknown, nil
 }
 
-func extractTarGz(r io.Reader, dest string) error {
+func extractTarGz(r io.Reader, dest string, limits archiveLimits) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
@@ -1132,6 +1228,9 @@ func extractTarGz(r io.Reader, dest string) error {
 	if err != nil {
 		return err
 	}
+	seen := map[string]struct{}{}
+	entries := 0
+	var expandedBytes int64
 
 	for {
 		hdr, err := tr.Next()
@@ -1145,12 +1244,20 @@ func extractTarGz(r io.Reader, dest string) error {
 		if !ok {
 			return fmt.Errorf("invalid path in archive: %s", hdr.Name)
 		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("duplicate path in archive: %s", hdr.Name)
+		}
+		seen[name] = struct{}{}
+		entries++
+		if limits.MaxFiles > 0 && entries > limits.MaxFiles {
+			return fmt.Errorf("archive contains more than %d entries", limits.MaxFiles)
+		}
 		target := filepath.Join(dest, name)
 		absTarget, err := filepath.Abs(target)
 		if err != nil {
 			return err
 		}
-		if !strings.HasPrefix(absTarget, base) {
+		if !pathWithinBase(base, absTarget) {
 			return fmt.Errorf("invalid path in archive: %s", hdr.Name)
 		}
 
@@ -1160,6 +1267,10 @@ func extractTarGz(r io.Reader, dest string) error {
 				return err
 			}
 		case tar.TypeReg:
+			if hdr.Size < 0 || (limits.MaxBytes > 0 && hdr.Size > limits.MaxBytes-expandedBytes) {
+				return fmt.Errorf("archive expands beyond %d bytes", limits.MaxBytes)
+			}
+			expandedBytes += hdr.Size
 			if err := os.MkdirAll(filepath.Dir(absTarget), 0o755); err != nil {
 				return err
 			}
@@ -1173,13 +1284,13 @@ func extractTarGz(r io.Reader, dest string) error {
 			}
 			f.Close()
 		default:
-			continue
+			return fmt.Errorf("unsupported archive entry type for %s", hdr.Name)
 		}
 	}
 	return nil
 }
 
-func extractZip(f *os.File, dest string) error {
+func extractZip(f *os.File, dest string, limits archiveLimits) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
@@ -1195,17 +1306,28 @@ func extractZip(f *os.File, dest string) error {
 	if err != nil {
 		return err
 	}
+	seen := map[string]struct{}{}
+	entries := 0
+	var expandedBytes int64
 	for _, zf := range zr.File {
 		name, ok := cleanArchivePath(zf.Name)
 		if !ok {
 			return fmt.Errorf("invalid path in archive: %s", zf.Name)
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("duplicate path in archive: %s", zf.Name)
+		}
+		seen[name] = struct{}{}
+		entries++
+		if limits.MaxFiles > 0 && entries > limits.MaxFiles {
+			return fmt.Errorf("archive contains more than %d entries", limits.MaxFiles)
 		}
 		target := filepath.Join(dest, name)
 		absTarget, err := filepath.Abs(target)
 		if err != nil {
 			return err
 		}
-		if !strings.HasPrefix(absTarget, base) {
+		if !pathWithinBase(base, absTarget) {
 			return fmt.Errorf("invalid path in archive: %s", zf.Name)
 		}
 		if zf.FileInfo().IsDir() {
@@ -1214,6 +1336,14 @@ func extractZip(f *os.File, dest string) error {
 			}
 			continue
 		}
+		if !zf.Mode().IsRegular() {
+			return fmt.Errorf("unsupported archive entry type for %s", zf.Name)
+		}
+		entrySize := int64(zf.UncompressedSize64)
+		if entrySize < 0 || (limits.MaxBytes > 0 && entrySize > limits.MaxBytes-expandedBytes) {
+			return fmt.Errorf("archive expands beyond %d bytes", limits.MaxBytes)
+		}
+		expandedBytes += entrySize
 		if err := os.MkdirAll(filepath.Dir(absTarget), 0o755); err != nil {
 			return err
 		}
@@ -1319,9 +1449,16 @@ func listZipContents(f *os.File, limit int) ([]string, error) {
 
 func cleanArchivePath(name string) (string, bool) {
 	name = strings.ReplaceAll(name, "\\", "/")
-	name = path.Clean("/" + name)
-	name = strings.TrimPrefix(name, "/")
-	if name == "" || strings.HasPrefix(name, "..") {
+	if name == "" || strings.HasPrefix(name, "/") || (len(name) >= 2 && name[1] == ':') {
+		return "", false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == ".." {
+			return "", false
+		}
+	}
+	name = path.Clean(name)
+	if name == "" || name == "." || strings.HasPrefix(name, "../") || len(name) > 1024 {
 		return "", false
 	}
 	return name, true

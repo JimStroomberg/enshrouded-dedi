@@ -1,0 +1,75 @@
+services:
+  game:
+    image: alpine:3.22
+    container_name: enshrouded-restore-drill-game
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /data/savegame /data/server
+        test -f /data/savegame/3ad85aea || printf 'original-world\n' >/data/savegame/3ad85aea
+        test -f /data/savegame/3ad85aea-index || printf 'original-world-index\n' >/data/savegame/3ad85aea-index
+        test -f /data/savegame/characters || printf 'original-characters\n' >/data/savegame/characters
+        test -f /data/savegame/characters-index || printf 'original-characters-index\n' >/data/savegame/characters-index
+        test -f /data/server/enshrouded_server.json || printf '{"name":"restore-drill","saveDirectory":"/data/savegame"}\n' >/data/server/enshrouded_server.json
+        test -f /data/server/server_config.txt || printf 'SAVE_DIR=/data/savegame\n' >/data/server/server_config.txt
+        exec tail -f /dev/null
+    volumes:
+      - drill_data:/data
+    healthcheck:
+      test: ["CMD", "test", "-s", "/data/savegame/3ad85aea"]
+      interval: 1s
+      timeout: 1s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: drill-access
+      MINIO_ROOT_PASSWORD: drill-secret-key
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  backup:
+    image: enshrouded-backup:restore-drill
+    platform: linux/amd64
+    environment:
+      BACKUP_SAVE_DIR: /data/savegame
+      BACKUP_SERVER_CONFIG_PATH: /data/server/enshrouded_server.json
+      BACKUP_SERVER_CONFIG_TXT_PATH: /data/server/server_config.txt
+      BACKUP_STEAM_APP_MANIFEST: /data/server/steamapps/appmanifest_2278520.acf
+      BACKUP_S3_ENDPOINT: http://minio:9000
+      BACKUP_S3_ACCESS_KEY: drill-access
+      BACKUP_S3_SECRET_KEY: drill-secret-key
+      BACKUP_S3_BUCKET: restore-drill
+      BACKUP_S3_SSL: "false"
+      BACKUP_INTERVAL_HOURS: "0"
+      BACKUP_RETENTION_DAILIES: "14"
+      BACKUP_RETENTION_WEEKLIES: "8"
+      BACKUP_RETENTION_MONTHLIES: "12"
+      BACKUP_BIND_ADDR: 0.0.0.0:7000
+      BACKUP_MAX_EXTRACT_FILES: "1000"
+      BACKUP_MAX_EXTRACT_BYTES: "104857600"
+      BACKUP_HEALTH_TIMEOUT_SECONDS: "30"
+      ENSHROUDED_CONTAINER_NAME: enshrouded-restore-drill-game
+    volumes:
+      - drill_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      game:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7000/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+volumes:
+  drill_data:

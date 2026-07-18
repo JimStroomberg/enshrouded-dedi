@@ -24,6 +24,17 @@ func TestParseTimestamp(t *testing.T) {
 	}
 }
 
+func TestParseTimestampWithNanoseconds(t *testing.T) {
+	got, err := parseTimestamp("backup-20260718-175440.123456789.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, time.July, 18, 17, 54, 40, 123456789, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
 func TestParseTimestampRejectsInvalidNames(t *testing.T) {
 	for _, name := range []string{
 		"backup-20260718-175440.tar",
