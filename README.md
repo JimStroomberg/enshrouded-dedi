@@ -7,7 +7,7 @@ One-command Docker Compose stack to run an Enshrouded dedicated server with:
 - MinIO for bundled S3 storage (versioning on, retention ready).
 
 ## Quickstart
-1) `cp .env.example .env` and set at least `UI_ADMIN_USERNAME`, `UI_ADMIN_PASSWORD`, `MINIO_ROOT_PASSWORD`, `UI_SESSION_SECRET`. Configure the Friend access-group password in the UI after first start.
+1) `cp .env.example .env` and replace every value marked `change-me`. Configure the Friend access-group password in the UI after first start.
 2) Run `docker compose up -d`.  
 3) Visit `http://localhost:8080` for status; log in with the admin creds to manage the server.
 
@@ -74,8 +74,9 @@ Copy `.env.example` and adjust:
 - Logs: use the UI “Download Logs” or `docker compose logs -f enshrouded backup ui`.
 
 ## CI/CD and publishing
-- GitHub Actions (`.github/workflows/ci.yml`): validates compose, runs Go fmt + tests, and on release tags posts to a Docker Hub webhook (`DOCKER_HUB_HOOK_URL` secret) to trigger multi-arch builds (`powermountain/enshrouded-dedi-server`, `powermountain/enshrouded-dedi-ui`, `powermountain/enshrouded-dedi-backup`).
-- Compose-first setup: build locally with `docker compose build` or rely on the published images on tag.
+- GitHub Actions (`.github/workflows/ci.yml`) validates Compose, runs formatting, race-enabled tests, coverage, vet, `govulncheck`, and the disposable restore drill before building all three AMD64 images.
+- Commits on `main` publish immutable `main-<commit>` tags in addition to `latest`; production should use the immutable tag recorded in the deployment log.
+- Go, GitHub Actions, Debian, MinIO, and MinIO Client inputs are version/digest pinned. Dependabot proposes reviewed updates for Go modules, Actions, and Dockerfiles.
 
 ## Spec reference
 See `docs/specification.md` for the full goals, non-goals, and acceptance criteria.
