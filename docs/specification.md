@@ -259,7 +259,7 @@ README must instruct:
   - `powermountain/enshrouded-dedi-server`
   - `powermountain/enshrouded-dedi-ui`
   - `powermountain/enshrouded-dedi-backup`
-  - `powermountain/enshrouded-dedi-controller`
+  - `powermountain/enshrouded-dedi-control`
 
 ### 10.3 GitHub workflow triggers
 
