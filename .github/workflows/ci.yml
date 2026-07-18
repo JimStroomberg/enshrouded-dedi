@@ -74,7 +74,7 @@ jobs:
             context: .
             file: docker/ui/Dockerfile
           - name: controller
-            image: powermountain/enshrouded-dedi-controller
+            image: powermountain/enshrouded-dedi-control
             context: .
             file: docker/controller/Dockerfile
     steps:

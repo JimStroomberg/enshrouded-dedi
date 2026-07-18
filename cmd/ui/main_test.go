@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,41 @@ func TestCSRFRejectsStateChangingRequest(t *testing.T) {
 	srv.handler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("got status %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestCSRFAcceptsValidPlaintextForm(t *testing.T) {
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{}`)
+	}))
+	handler := srv.handler()
+
+	getReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	getRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(getRecorder, getReq)
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("GET returned status %d", getRecorder.Code)
+	}
+	match := regexp.MustCompile(`name="gorilla\.csrf\.Token" value="([^"]+)"`).FindStringSubmatch(getRecorder.Body.String())
+	if len(match) != 2 {
+		t.Fatal("CSRF form token was not rendered")
+	}
+
+	form := url.Values{
+		"gorilla.csrf.Token": {match[1]},
+		"username":           {srv.cfg.AdminUser},
+		"password":           {srv.cfg.AdminPass},
+	}
+	postReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, cookie := range getRecorder.Result().Cookies() {
+		postReq.AddCookie(cookie)
+	}
+	postRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(postRecorder, postReq)
+	if postRecorder.Code != http.StatusSeeOther {
+		t.Fatalf("valid plaintext form returned status %d, want %d", postRecorder.Code, http.StatusSeeOther)
 	}
 }
 

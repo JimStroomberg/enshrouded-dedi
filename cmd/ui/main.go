@@ -248,10 +248,16 @@ func (s *Server) handler() http.Handler {
 		csrf.Path("/"),
 		csrf.SameSite(csrf.SameSiteLaxMode),
 		csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s.logger.Printf("csrf rejected method=%s path=%s remote=%s", r.Method, r.URL.Path, remoteIP(r))
+			s.logger.Printf("csrf rejected method=%s path=%s remote=%s reason=%v", r.Method, r.URL.Path, remoteIP(r), csrf.FailureReason(r))
 			http.Error(w, "invalid or expired form; refresh the page and try again", http.StatusForbidden)
 		})),
 	)(r)
+	if !s.cfg.SecureCookies {
+		csrfHandler := protected
+		protected = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			csrfHandler.ServeHTTP(w, csrf.PlaintextHTTPRequest(r))
+		})
+	}
 	return securityHeaders(protected)
 }
 

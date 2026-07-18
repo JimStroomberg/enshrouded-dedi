@@ -2,8 +2,6 @@ services:
   enshrouded:
     image: ${SERVER_IMAGE:-powermountain/enshrouded-dedi-server:latest}
     platform: linux/amd64
-    build:
-      context: ./docker/enshrouded
     container_name: ${ENSHROUDED_CONTAINER_NAME:-enshrouded}
     restart: unless-stopped
     read_only: true
@@ -15,7 +13,6 @@ services:
       - ALL
     mem_limit: ${SERVER_MEMORY_LIMIT:-16g}
     cpus: ${SERVER_CPU_LIMIT:-6}
-    env_file: .env
     environment:
       SERVER_NAME: ${SERVER_NAME}
       MAX_PLAYERS: ${MAX_PLAYERS}
@@ -43,11 +40,7 @@ services:
   backup:
     image: ${BACKUP_IMAGE:-powermountain/enshrouded-dedi-backup:latest}
     platform: linux/amd64
-    build:
-      context: .
-      dockerfile: docker/backup/Dockerfile
     restart: unless-stopped
-    env_file: .env
     environment:
       BACKUP_SAVE_DIR: ${BACKUP_SAVE_DIR}
       BACKUP_SERVER_CONFIG_PATH: ${BACKUP_SERVER_CONFIG_PATH:-/data/server/enshrouded_server.json}
@@ -113,11 +106,7 @@ services:
   ui:
     image: ${UI_IMAGE:-powermountain/enshrouded-dedi-ui:latest}
     platform: linux/amd64
-    build:
-      context: .
-      dockerfile: docker/ui/Dockerfile
     restart: unless-stopped
-    env_file: .env
     environment:
       STACK_NAME: ${STACK_NAME}
       UI_ADMIN_USERNAME: ${UI_ADMIN_USERNAME}
@@ -157,7 +146,6 @@ services:
     image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     restart: unless-stopped
-    env_file: .env
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -186,9 +174,12 @@ services:
 
   minio-init:
     image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    env_file: .env
     environment:
       MC_CONFIG_DIR: /tmp/.mc
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_RETENTION_DAYS: ${MINIO_RETENTION_DAYS:-}
     entrypoint: ["/bin/sh", "-c"]
     command: |
       set -eu
@@ -214,11 +205,8 @@ services:
       - ALL
 
   controller:
-    image: ${CONTROLLER_IMAGE:-powermountain/enshrouded-dedi-controller:latest}
+    image: ${CONTROLLER_IMAGE:-powermountain/enshrouded-dedi-control:latest}
     platform: linux/amd64
-    build:
-      context: .
-      dockerfile: docker/controller/Dockerfile
     restart: unless-stopped
     environment:
       ENSHROUDED_CONTAINER_NAME: ${ENSHROUDED_CONTAINER_NAME}
