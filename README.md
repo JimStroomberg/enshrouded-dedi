@@ -28,7 +28,7 @@ Copy `.env.example` and adjust:
 - Server (initial defaults): `SERVER_NAME`, `MAX_PLAYERS`, `GAME_PORT`, `QUERY_PORT`, `SAVE_DIR`, `TZ`, `UPDATE_ON_START` (true/false). Runtime values, including access-group passwords, are stored in `enshrouded_server.json` and managed via the UI.
 - Steam download: default is anonymous. If you see `Failed to install app '2278520' (No subscription)` or Steam Guard prompts, use the UI “Steam Login” form (admin only) to save your Steam credentials (and Guard code) to the shared volume, then restart the server from the UI. You can also set `STEAM_USERNAME`/`STEAM_PASSWORD`/`STEAM_GUARD_CODE` in `.env` if you prefer.
 - UI: `UI_ADMIN_USERNAME`, `UI_ADMIN_PASSWORD`, `UI_SESSION_SECRET` (long random), `STACK_NAME`.
-- Backup: `BACKUP_INTERVAL_HOURS` (default 24), `BACKUP_RETENTION_DAILIES`/`WEEKLIES`/`MONTHLIES`, `BACKUP_SAVE_DIR`, explicit config/log/auth paths (`BACKUP_SERVER_CONFIG_PATH`, `BACKUP_SERVER_CONFIG_TXT_PATH`, `BACKUP_LOG_DIR`, `BACKUP_STEAM_AUTH_FILE`), `BACKUP_BIND_ADDR`, `ENSHROUDED_CONTAINER_NAME` (default `enshrouded`), S3 settings (`BACKUP_S3_*`).
+- Backup: `BACKUP_INTERVAL_HOURS` (default 24), `BACKUP_RETENTION_DAILIES`/`WEEKLIES`/`MONTHLIES`, `BACKUP_SAVE_DIR`, explicit config/log/auth paths (`BACKUP_SERVER_CONFIG_PATH`, `BACKUP_SERVER_CONFIG_TXT_PATH`, `BACKUP_LOG_DIR`, `BACKUP_STEAM_AUTH_FILE`), restore limits (`BACKUP_MAX_EXTRACT_FILES`, `BACKUP_MAX_EXTRACT_BYTES`), `BACKUP_BIND_ADDR`, `ENSHROUDED_CONTAINER_NAME` (default `enshrouded`), S3 settings (`BACKUP_S3_*`).
 - MinIO: `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET` (default `enshrouded-backups`), `MINIO_RETENTION_DAYS` (for bucket ILM), `MINIO_REGION`.
 
 ## Admin UI usage
@@ -47,9 +47,11 @@ Copy `.env.example` and adjust:
 
 ## Backups & retention
 - Scheduled backup every `BACKUP_INTERVAL_HOURS` (24 by default) plus manual trigger.
+- Backups briefly stop the game only while save/config files are copied to a consistent staging snapshot; the game restarts before compression and upload.
+- New archives include the savegame, server configuration, game build, and a SHA-256 manifest. Legacy save-only archives remain restorable.
 - Stored in MinIO bucket `enshrouded-backups` (configurable) with versioning on.
 - Retention: keep last 14 daily, 8 weekly, 12 monthly backups (configurable). Extra backups are pruned after each new backup; archives with unknown names are retained rather than deleted.
-- Restore flow stops the game container, restores files, then restarts.
+- Restore validates and stages the full archive before stopping the game, keeps the previous save/config as a rollback, and automatically restores it if the new save does not become healthy.
 - Upload/restore accepts `.tar.gz` and `.zip` archives; contents should be at the archive root.
 
 ## Data persistence

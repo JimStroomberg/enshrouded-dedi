@@ -53,6 +53,10 @@ jobs:
           BACKUP_SERVER_CONFIG_TXT_PATH=/data/server/server_config.txt
           BACKUP_LOG_DIR=/data/server/logs
           BACKUP_STEAM_AUTH_FILE=/data/steam_auth.env
+          BACKUP_STEAM_APP_MANIFEST=/data/server/steamapps/appmanifest_2278520.acf
+          BACKUP_MAX_EXTRACT_FILES=10000
+          BACKUP_MAX_EXTRACT_BYTES=4294967296
+          BACKUP_HEALTH_TIMEOUT_SECONDS=180
           BACKUP_BIND_ADDR=0.0.0.0:7000
           ENSHROUDED_CONTAINER_NAME=enshrouded
           BACKUP_LOG_LEVEL=info
@@ -76,6 +80,8 @@ jobs:
           git diff --exit-code
       - name: Go test
         run: go test ./cmd/...
+      - name: Transactional restore drill
+        run: ./scripts/restore-drill.sh
 
   build:
     needs: test
