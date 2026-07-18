@@ -32,3 +32,8 @@ updates:
     directory: /docker/enshrouded
     schedule:
       interval: weekly
+
+  - package-ecosystem: docker
+    directory: /docker/controller
+    schedule:
+      interval: weekly

@@ -3,25 +3,33 @@ package main
 import (
 	"bytes"
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/gorilla/csrf"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
+
+	"github.com/JimStroomberg/enshrouded-dedi/internal/a2s"
 )
+
+//go:embed static/logo.svg
+var staticAssets embed.FS
 
 // UIConfig holds env configuration.
 type UIConfig struct {
@@ -31,8 +39,13 @@ type UIConfig struct {
 	AdminUser     string
 	AdminPass     string
 	SessionSecret string
+	SessionCrypt  string
+	CSRFKey       string
+	SecureCookies bool
 	BackupAPI     string
+	BackupToken   string
 	SessionHours  int
+	AllowInsecure bool
 	A2SEnabled    bool
 	A2SAddr       string
 	A2STimeout    time.Duration
@@ -51,6 +64,7 @@ type Server struct {
 	a2sAddr     string
 	a2sTimeout  time.Duration
 	a2sCacheTTL time.Duration
+	loginGuard  *loginLimiter
 }
 
 type statusResponse struct {
@@ -71,9 +85,31 @@ type steamState struct {
 }
 
 type backupItem struct {
-	Key          string    `json:"Key"`
-	Size         int64     `json:"Size"`
-	LastModified time.Time `json:"LastModified"`
+	Key          string    `json:"name"`
+	Size         int64     `json:"size"`
+	LastModified time.Time `json:"lastModified"`
+}
+
+type jobView struct {
+	ID         string                 `json:"id"`
+	Type       string                 `json:"type"`
+	State      string                 `json:"state"`
+	CreatedAt  time.Time              `json:"created_at"`
+	FinishedAt *time.Time             `json:"finished_at,omitempty"`
+	DurationMS int64                  `json:"duration_ms,omitempty"`
+	Result     map[string]interface{} `json:"result,omitempty"`
+	Error      string                 `json:"error,omitempty"`
+}
+
+type operationsView struct {
+	NextScheduledRun *time.Time `json:"next_scheduled_run,omitempty"`
+	LastBackup       *struct {
+		Name           string    `json:"name"`
+		Size           int64     `json:"size"`
+		LastModified   time.Time `json:"last_modified"`
+		AgeSeconds     int64     `json:"age_seconds"`
+		ChecksumStatus string    `json:"checksum_status"`
+	} `json:"last_backup,omitempty"`
 }
 
 type serverConfigView struct {
@@ -86,19 +122,10 @@ type serverConfigView struct {
 	GameSettingsPreset string                 `json:"game_settings_preset"`
 	DayTimeMinutes     int                    `json:"day_time_minutes"`
 	NightTimeMinutes   int                    `json:"night_time_minutes"`
-	ServerPassword     string                 `json:"server_password"`
 	GameSettings       map[string]interface{} `json:"game_settings"`
 }
 
-type a2sInfo struct {
-	Name       string `json:"name"`
-	Map        string `json:"map"`
-	Players    int    `json:"players"`
-	MaxPlayers int    `json:"max_players"`
-	Bots       int    `json:"bots"`
-	Version    string `json:"version"`
-	VAC        bool   `json:"vac"`
-}
+type a2sInfo = a2s.Info
 
 type a2sCache struct {
 	info *a2sInfo
@@ -116,20 +143,28 @@ func main() {
 	cfg := UIConfig{
 		StackName:     getenv("STACK_NAME", "Enshrouded Stack"),
 		ServerName:    getenv("UI_SERVER_NAME", getenv("SERVER_NAME", "Enshrouded Server")),
-		LogoURL:       getenv("UI_LOGO_URL", "https://seafile.keengames.com/thumbnail/01124f597b214107abf6/1024/Logos/Enshrouded_graphical_logo_TRANSPARENT.png"),
+		LogoURL:       getenv("UI_LOGO_URL", "/static/logo.svg"),
 		AdminUser:     getenv("UI_ADMIN_USERNAME", "admin"),
-		AdminPass:     getenv("UI_ADMIN_PASSWORD", "changeme"),
-		SessionSecret: getenv("UI_SESSION_SECRET", "change-me"),
+		AdminPass:     getenv("UI_ADMIN_PASSWORD", ""),
+		SessionSecret: getenv("UI_SESSION_SECRET", ""),
+		SessionCrypt:  getenv("UI_SESSION_ENCRYPTION_KEY", ""),
+		CSRFKey:       getenv("UI_CSRF_KEY", ""),
+		SecureCookies: envBool("UI_SECURE_COOKIES", false),
 		BackupAPI:     getenv("BACKUP_API_URL", "http://backup:7000"),
+		BackupToken:   getenv("UI_INTERNAL_TOKEN", ""),
 		SessionHours:  atoiEnv("UI_SESSION_HOURS", 24),
+		AllowInsecure: envBool("ALLOW_INSECURE_DEFAULTS", false),
 		A2SEnabled:    envBool("A2S_ENABLED", true),
 		A2SAddr:       getenv("A2S_ADDR", "enshrouded:15637"),
 		A2STimeout:    durationMsEnv("A2S_TIMEOUT_MS", 1500),
 		A2SCacheTTL:   durationSecEnv("A2S_CACHE_SECONDS", 10),
 	}
+	if err := validateUIConfig(cfg); err != nil {
+		log.Fatalf("invalid UI configuration: %v", err)
+	}
 
-	store := sessions.NewCookieStore([]byte(cfg.SessionSecret))
-	store.Options = &sessions.Options{MaxAge: cfg.SessionHours * 3600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Path: "/"}
+	store := sessions.NewCookieStore([]byte(cfg.SessionSecret), []byte(cfg.SessionCrypt))
+	store.Options = &sessions.Options{MaxAge: cfg.SessionHours * 3600, HttpOnly: true, Secure: cfg.SecureCookies, SameSite: http.SameSiteLaxMode, Path: "/"}
 
 	tmpl := template.Must(template.New("page").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -137,48 +172,106 @@ func main() {
 	}).Parse(pageTemplate))
 
 	srv := &Server{
-		cfg:         cfg,
-		store:       store,
-		client:      &http.Client{Timeout: 10 * time.Second},
+		cfg:   cfg,
+		store: store,
+		client: &http.Client{
+			Timeout:   15 * time.Minute,
+			Transport: &tokenTransport{base: http.DefaultTransport, token: cfg.BackupToken},
+		},
 		logger:      log.New(os.Stdout, "ui ", log.LstdFlags|log.Lmsgprefix),
 		tmpl:        tmpl,
 		a2sEnabled:  cfg.A2SEnabled,
 		a2sAddr:     cfg.A2SAddr,
 		a2sTimeout:  cfg.A2STimeout,
 		a2sCacheTTL: cfg.A2SCacheTTL,
+		loginGuard:  newLoginLimiter(5, 15*time.Minute),
 	}
 
-	r := mux.NewRouter()
-	r.HandleFunc("/health", srv.handleHealth).Methods(http.MethodGet)
-	r.HandleFunc("/", srv.handleIndex).Methods(http.MethodGet)
-	r.HandleFunc("/login", srv.handleLogin).Methods(http.MethodPost)
-	r.HandleFunc("/logout", srv.handleLogout).Methods(http.MethodPost)
-	r.HandleFunc("/logs", srv.requireAuth(srv.handleLogs)).Methods(http.MethodGet)
-
-	r.HandleFunc("/action/restart", srv.requireAuth(srv.handleActionRestart)).Methods(http.MethodPost)
-	r.HandleFunc("/action/update", srv.requireAuth(srv.handleActionUpdate)).Methods(http.MethodPost)
-	r.HandleFunc("/action/backup", srv.requireAuth(srv.handleActionBackup)).Methods(http.MethodPost)
-	r.HandleFunc("/action/restore", srv.requireAuth(srv.handleActionRestore)).Methods(http.MethodPost)
-	r.HandleFunc("/action/upload", srv.requireAuth(srv.handleActionUpload)).Methods(http.MethodPost)
-	r.HandleFunc("/action/steam-auth", srv.requireAuth(srv.handleActionSteamAuth)).Methods(http.MethodPost)
-	r.HandleFunc("/action/steam-anon", srv.requireAuth(srv.handleActionSteamAnon)).Methods(http.MethodPost)
-	r.HandleFunc("/action/groups", srv.requireAuth(srv.handleActionGroupPasswords)).Methods(http.MethodPost)
-	r.HandleFunc("/action/server-config", srv.requireAuth(srv.handleActionServerConfig)).Methods(http.MethodPost)
-	r.HandleFunc("/backup/download", srv.requireAuth(srv.handleDownloadBackup)).Methods(http.MethodGet)
-	r.HandleFunc("/backup/contents", srv.requireAuth(srv.handleBackupContents)).Methods(http.MethodGet)
-
-	r.HandleFunc("/api/status", srv.handleAPIStatus).Methods(http.MethodGet)
+	csrfHandler := srv.handler()
 
 	addr := ":8080"
-	srv.logger.Printf("listening on %s", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           csrfHandler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Minute,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+	}
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-shutdownCtx.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			srv.logger.Printf("http shutdown error: %v", err)
+		}
+	}()
+
+	srv.logger.Printf("listening on %s secure_cookies=%t", addr, cfg.SecureCookies)
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		srv.logger.Fatalf("http server error: %v", err)
 	}
+}
+
+func (s *Server) handler() http.Handler {
+	r := mux.NewRouter()
+	r.PathPrefix("/static/").Handler(http.FileServer(http.FS(staticAssets))).Methods(http.MethodGet)
+	r.HandleFunc("/health", s.handleHealth).Methods(http.MethodGet)
+	r.HandleFunc("/ready", s.handleReady).Methods(http.MethodGet)
+	r.HandleFunc("/", s.handleIndex).Methods(http.MethodGet)
+	r.HandleFunc("/login", s.handleLogin).Methods(http.MethodPost)
+	r.HandleFunc("/logout", s.handleLogout).Methods(http.MethodPost)
+	r.HandleFunc("/logs", s.requireAuth(s.handleLogs)).Methods(http.MethodGet)
+
+	r.HandleFunc("/action/restart", s.requireAuth(s.handleActionRestart)).Methods(http.MethodPost)
+	r.HandleFunc("/action/update", s.requireAuth(s.handleActionUpdate)).Methods(http.MethodPost)
+	r.HandleFunc("/action/backup", s.requireAuth(s.handleActionBackup)).Methods(http.MethodPost)
+	r.HandleFunc("/action/restore", s.requireAuth(s.handleActionRestore)).Methods(http.MethodPost)
+	r.HandleFunc("/action/upload", s.requireAuth(s.handleActionUpload)).Methods(http.MethodPost)
+	r.HandleFunc("/action/steam-auth", s.requireAuth(s.handleActionSteamAuth)).Methods(http.MethodPost)
+	r.HandleFunc("/action/steam-anon", s.requireAuth(s.handleActionSteamAnon)).Methods(http.MethodPost)
+	r.HandleFunc("/action/groups", s.requireAuth(s.handleActionGroupPasswords)).Methods(http.MethodPost)
+	r.HandleFunc("/action/server-config", s.requireAuth(s.handleActionServerConfig)).Methods(http.MethodPost)
+	r.HandleFunc("/backup/download", s.requireAuth(s.handleDownloadBackup)).Methods(http.MethodGet)
+	r.HandleFunc("/backup/contents", s.requireAuth(s.handleBackupContents)).Methods(http.MethodGet)
+	r.HandleFunc("/backup/preview", s.requireAuth(s.handleBackupPreview)).Methods(http.MethodGet)
+	r.HandleFunc("/diagnostics", s.requireAuth(s.handleDiagnostics)).Methods(http.MethodGet)
+
+	r.HandleFunc("/api/status", s.handleAPIStatus).Methods(http.MethodGet)
+
+	protected := csrf.Protect(
+		[]byte(s.cfg.CSRFKey),
+		csrf.Secure(s.cfg.SecureCookies),
+		csrf.HttpOnly(true),
+		csrf.Path("/"),
+		csrf.SameSite(csrf.SameSiteLaxMode),
+		csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.logger.Printf("csrf rejected method=%s path=%s remote=%s", r.Method, r.URL.Path, remoteIP(r))
+			http.Error(w, "invalid or expired form; refresh the page and try again", http.StatusForbidden)
+		})),
+	)(r)
+	return securityHeaders(protected)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprint(w, `{"status":"ok"}`)
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	url := fmt.Sprintf("%s/ready", strings.TrimRight(s.cfg.BackupAPI, "/"))
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		http.Error(w, "backup service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 1<<20))
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -187,20 +280,24 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	status, _ := s.fetchStatus(r.Context())
 	st := &steamState{Mode: "unset"}
-	if fetched, err := s.fetchSteamState(r.Context()); err == nil && fetched != nil {
-		st = fetched
-	}
 	stats, statsErr := s.fetchServerStats(r.Context())
 	if statsErr != nil {
 		s.logger.Printf("a2s query error: %v", statsErr)
 	}
 	var backups []backupItem
+	var jobs []jobView
+	var operations *operationsView
+	serverCfg := &serverConfigView{}
 	if loggedIn {
 		backups, _ = s.fetchBackups(r.Context())
-	}
-	serverCfg, _ := s.fetchServerConfig(r.Context())
-	if serverCfg == nil {
-		serverCfg = &serverConfigView{}
+		jobs, _ = s.fetchJobs(r.Context())
+		operations, _ = s.fetchOperations(r.Context())
+		if fetched, err := s.fetchSteamState(r.Context()); err == nil && fetched != nil {
+			st = fetched
+		}
+		if fetched, err := s.fetchServerConfig(r.Context()); err == nil && fetched != nil {
+			serverCfg = fetched
+		}
 	}
 
 	serverName := s.cfg.ServerName
@@ -217,9 +314,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Stats":      stats,
 		"StatsErr":   statsErr,
 		"Backups":    backups,
+		"Jobs":       jobs,
+		"Operations": operations,
 		"LoggedIn":   loggedIn,
 		"Message":    r.URL.Query().Get("msg"),
 		"ServerCfg":  serverCfg,
+		"CSRFField":  csrf.TemplateField(r),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -235,13 +335,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user := r.FormValue("username")
 	pass := r.FormValue("password")
-	if user == s.cfg.AdminUser && pass == s.cfg.AdminPass {
+	ip := remoteIP(r)
+	if !s.loginGuard.allow(ip, time.Now()) {
+		s.logger.Printf("login throttled remote=%s", ip)
+		http.Error(w, "too many login attempts; try again later", http.StatusTooManyRequests)
+		return
+	}
+	if constantTimeEqual(user, s.cfg.AdminUser) && constantTimeEqual(pass, s.cfg.AdminPass) {
+		s.loginGuard.success(ip)
 		session, _ := s.store.Get(r, "enshrouded-ui")
 		session.Values["auth"] = true
 		_ = session.Save(r, w)
 		http.Redirect(w, r, "/?msg=Logged+in", http.StatusSeeOther)
 		return
 	}
+	s.loginGuard.failure(ip, time.Now())
+	s.logger.Printf("login rejected remote=%s", ip)
 	http.Redirect(w, r, "/?msg=Invalid+credentials", http.StatusSeeOther)
 }
 
@@ -319,6 +428,50 @@ func (s *Server) handleBackupContents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleBackupPreview(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		http.Error(w, "backup name required", http.StatusBadRequest)
+		return
+	}
+	upstream := fmt.Sprintf("%s/backups/preview?name=%s", strings.TrimRight(s.cfg.BackupAPI, "/"), url.QueryEscape(name))
+	s.proxyJSON(w, r, upstream)
+}
+
+func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	upstream := fmt.Sprintf("%s/diagnostics", strings.TrimRight(s.cfg.BackupAPI, "/"))
+	resp, err := s.client.Get(upstream)
+	if err != nil {
+		http.Error(w, "failed to build diagnostics", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		http.Error(w, "diagnostics unavailable", http.StatusBadGateway)
+		return
+	}
+	for _, header := range []string{"Content-Type", "Content-Disposition", "Content-Length"} {
+		if value := resp.Header.Get(header); value != "" {
+			w.Header().Set(header, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *Server) proxyJSON(w http.ResponseWriter, r *http.Request, upstream string) {
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, upstream, nil)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 8<<20))
 }
 
 func (s *Server) handleActionRestart(w http.ResponseWriter, r *http.Request) {
@@ -413,7 +566,7 @@ func (s *Server) handleActionUpload(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?msg=Upload+failed", http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/?msg=Upload+restored", http.StatusSeeOther)
+	http.Redirect(w, r, "/?msg=Upload+and+restore+queued", http.StatusSeeOther)
 }
 
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
@@ -436,6 +589,9 @@ func (s *Server) fetchStatus(ctx context.Context) (*statusResponse, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstream status %s", resp.Status)
+	}
 	var out statusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
@@ -451,11 +607,50 @@ func (s *Server) fetchBackups(ctx context.Context) ([]backupItem, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstream status %s", resp.Status)
+	}
 	var items []backupItem
 	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
 		return nil, err
 	}
 	return items, nil
+}
+
+func (s *Server) fetchJobs(ctx context.Context) ([]jobView, error) {
+	url := fmt.Sprintf("%s/jobs?limit=12", strings.TrimRight(s.cfg.BackupAPI, "/"))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstream status %s", resp.Status)
+	}
+	var items []jobView
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (s *Server) fetchOperations(ctx context.Context) (*operationsView, error) {
+	url := fmt.Sprintf("%s/operations/status", strings.TrimRight(s.cfg.BackupAPI, "/"))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstream status %s", resp.Status)
+	}
+	var status operationsView
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, err
+	}
+	return &status, nil
 }
 
 func (s *Server) fetchServerConfig(ctx context.Context) (*serverConfigView, error) {
@@ -484,6 +679,9 @@ func (s *Server) fetchSteamState(ctx context.Context) (*steamState, error) {
 		return &steamState{Mode: "unset"}, nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return &steamState{Mode: "unset"}, fmt.Errorf("upstream status %s", resp.Status)
+	}
 	var st steamState
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		return &steamState{Mode: "unset"}, nil
@@ -507,7 +705,7 @@ func (s *Server) fetchServerStats(ctx context.Context) (*a2sInfo, error) {
 	}
 	s.a2sMu.Unlock()
 
-	info, err := queryA2S(s.a2sAddr, s.a2sTimeout)
+	info, err := a2s.Query(s.a2sAddr, s.a2sTimeout)
 
 	s.a2sMu.Lock()
 	s.a2sCached = a2sCache{info: info, err: err, ts: time.Now()}
@@ -606,13 +804,10 @@ func (s *Server) handleActionServerConfig(w http.ResponseWriter, r *http.Request
 	if v := strings.TrimSpace(r.FormValue("server_name")); v != "" {
 		payload["name"] = v
 	}
-	// Allow clearing password by sending empty string.
-	if v, ok := r.Form["server_password"]; ok {
-		if len(v) > 0 {
-			payload["server_password"] = strings.TrimSpace(v[len(v)-1])
-		} else {
-			payload["server_password"] = ""
-		}
+	if parseFormBool(r.FormValue("clear_server_password")) {
+		payload["server_password"] = ""
+	} else if v := strings.TrimSpace(r.FormValue("server_password")); v != "" {
+		payload["server_password"] = v
 	}
 	if v := strings.TrimSpace(r.FormValue("slot_count")); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
@@ -669,6 +864,16 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func getenv(key, def string) string {
@@ -793,671 +998,8 @@ func durationSecEnv(key string, def int) time.Duration {
 	return time.Duration(def) * time.Second
 }
 
-func queryA2S(addr string, timeout time.Duration) (*a2sInfo, error) {
-	if timeout <= 0 {
-		timeout = 1500 * time.Millisecond
-	}
-	conn, err := net.DialTimeout("udp", addr, timeout)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-
-	payload := append([]byte{0xFF, 0xFF, 0xFF, 0xFF}, []byte("TSource Engine Query\x00")...)
-	buf := make([]byte, 1400)
-
-	readResp := func(msg []byte) ([]byte, error) {
-		if _, err := conn.Write(msg); err != nil {
-			return nil, err
-		}
-		n, err := conn.Read(buf)
-		if err != nil {
-			return nil, err
-		}
-		if n < 5 {
-			return nil, fmt.Errorf("short A2S response")
-		}
-		return buf[:n], nil
-	}
-
-	resp, err := readResp(payload)
-	if err != nil {
-		return nil, err
-	}
-	if resp[4] == 'A' {
-		if len(resp) < 9 {
-			return nil, fmt.Errorf("short A2S challenge")
-		}
-		challenge := append([]byte{}, resp[5:9]...)
-		payloadChallenge := append(append([]byte{}, payload...), challenge...)
-		resp, err = readResp(payloadChallenge)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if resp[4] != 'I' {
-		return nil, fmt.Errorf("invalid A2S response")
-	}
-	data := resp[5:]
-	off := 0
-	if len(data) < 1 {
-		return nil, fmt.Errorf("short A2S response")
-	}
-	off++ // protocol byte
-
-	name, err := readCString(data, &off)
-	if err != nil {
-		return nil, err
-	}
-	mapName, err := readCString(data, &off)
-	if err != nil {
-		return nil, err
-	}
-	// skip folder and game strings
-	if _, err := readCString(data, &off); err != nil {
-		return nil, err
-	}
-	if _, err := readCString(data, &off); err != nil {
-		return nil, err
-	}
-	if off+7 > len(data) {
-		return nil, fmt.Errorf("short A2S response")
-	}
-	// appID (2 bytes)
-	off += 2
-	players := int(data[off])
-	off++
-	maxPlayers := int(data[off])
-	off++
-	bots := int(data[off])
-	off++
-	// server type, environment, visibility
-	off += 3
-	if off >= len(data) {
-		return nil, fmt.Errorf("short A2S response")
-	}
-	vac := data[off] == 1
-	off++
-
-	version := ""
-	if off < len(data) {
-		if v, err := readCString(data, &off); err == nil {
-			version = v
-		}
-	}
-
-	return &a2sInfo{
-		Name:       name,
-		Map:        mapName,
-		Players:    players,
-		MaxPlayers: maxPlayers,
-		Bots:       bots,
-		Version:    version,
-		VAC:        vac,
-	}, nil
-}
-
-func readCString(data []byte, off *int) (string, error) {
-	if *off >= len(data) {
-		return "", fmt.Errorf("short A2S string")
-	}
-	idx := bytes.IndexByte(data[*off:], 0)
-	if idx == -1 {
-		return "", fmt.Errorf("unterminated A2S string")
-	}
-	start := *off
-	*off += idx + 1
-	return string(data[start : start+idx]), nil
-}
-
-const pageTemplate = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{{ .StackName }} | Enshrouded</title>
-  <style>
-    :root {
-      --bg: radial-gradient(circle at 15% 20%, #0b1c28, #071018 45%, #04070c 100%);
-      --card: rgba(255,255,255,0.05);
-      --accent: #f97316;
-      --text: #f8fafc;
-      --muted: #cbd5e1;
-      --border: rgba(255,255,255,0.08);
-      --glow: 0 10px 40px rgba(249,115,22,0.25);
-      --shadow: 0 30px 80px rgba(0,0,0,0.5);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font-family: "Space Grotesk", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
-      padding: 24px;
-    }
-    .shell {
-      width: 100%;
-      max-width: 960px;
-      margin: 0 auto;
-      background: linear-gradient(160deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 28px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(6px);
-    }
-    header, .hero {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    h1 { margin: 6px 0 4px 0; font-size: 26px; letter-spacing: 0.01em; }
-    .hero { margin-bottom: 18px; }
-    .hero-sub { margin: 0; color: var(--muted); }
-    .badge { padding: 6px 10px; border-radius: 10px; background: rgba(249,115,22,0.08); border: 1px solid rgba(249,115,22,0.35); font-size: 12px; color: #fb923c; box-shadow: var(--glow); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
-    .title { font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px; }
-    .status { display: flex; align-items: center; gap: 8px; font-size: 16px; }
-    .dot { width: 10px; height: 10px; border-radius: 999px; }
-    .dot.ok { background: #34d399; box-shadow: 0 0 0 6px rgba(52,211,153,0.15); }
-    .dot.down { background: #f97316; box-shadow: 0 0 0 6px rgba(249,115,22,0.15); }
-    form { margin: 0; }
-    button, .ghost { appearance: none; border: 1px solid var(--border); background: rgba(255,255,255,0.06); color: var(--text); padding: 10px 12px; border-radius: 10px; cursor: pointer; font-weight: 600; letter-spacing: 0.01em; transition: 0.2s ease; }
-    button:hover, .ghost:hover { border-color: var(--accent); box-shadow: var(--glow); }
-    .danger { border-color: #f97316; background: rgba(249,115,22,0.12); box-shadow: 0 0 0 1px rgba(249,115,22,0.35), 0 10px 30px rgba(249,115,22,0.25); color: #fed7aa; }
-    .danger:hover { box-shadow: 0 0 0 1px rgba(249,115,22,0.45), 0 14px 40px rgba(249,115,22,0.35); }
-    .stack { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .msg { margin-top: 12px; color: var(--accent); font-weight: 600; }
-    table { width: 100%; border-collapse: collapse; font-size: 14px; }
-    th, td { padding: 8px 6px; text-align: left; color: var(--muted); }
-    th { text-transform: uppercase; letter-spacing: 0.05em; font-size: 12px; }
-    tr:nth-child(odd) td { background: rgba(255,255,255,0.02); }
-    input[type="text"], input[type="password"], input[type="file"] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); margin-bottom: 10px; }
-    .pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-    .hero-wrap { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .logo { max-height: 54px; object-fit: contain; filter: drop-shadow(0 8px 18px rgba(0,0,0,0.35)); }
-    .mode-toggle { display: inline-flex; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); }
-    .mode-toggle input { margin: 0; }
-    .mode-toggle span { flex: 1; min-width: 0; }
-    .mode-toggle input[type="number"], .mode-toggle input[type="text"], .mode-toggle select { max-width: 140px; min-width: 110px; }
-    .status-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; border:1px solid var(--border); background: rgba(255,255,255,0.04); }
-    .status-pill.warn { border-color:#f97316; color:#f97316; }
-    .howto { margin: 0; padding-left: 18px; color: var(--muted); }
-    .howto li { margin-bottom: 6px; }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <div class="hero-wrap">
-      <div class="hero">
-        <div class="badge">{{ .StackName }}</div>
-        <h1>{{ .ServerName }}</h1>
-        <p class="hero-sub">Enshrouded dedicated server control</p>
-      </div>
-      <header>
-        <div class="stack">
-          {{ if .LoggedIn }}
-            <form action="/logout" method="post"><button type="submit">Logout</button></form>
-          {{ else }}
-            <form action="/login" method="post" class="stack">
-              <input type="text" name="username" placeholder="Admin user" required />
-              <input type="password" name="password" placeholder="Password" required />
-              <button type="submit">Login</button>
-            </form>
-          {{ end }}
-        </div>
-        {{ if .LogoURL }}
-          <img class="logo" src="{{ .LogoURL }}" alt="Enshrouded" />
-        {{ end }}
-      </header>
-    </div>
-
-    {{ if .Message }}<div class="msg">{{ .Message }}</div>{{ end }}
-
-    <div class="grid" style="margin-bottom:16px;">
-      <div class="card">
-        <div class="title">Server</div>
-        {{ if .Status }}
-          <div class="status">
-            {{ if .Status.Running }}<div class="dot ok"></div>{{ else }}<div class="dot down"></div>{{ end }}
-            <div>
-              <div>{{ .Status.Name }}</div>
-              <div class="pill" style="margin-top:6px;">State: {{ .Status.State }}</div>
-              {{ if .Stats }}
-                <div class="pill" style="margin-top:6px;">Players: {{ .Stats.Players }} / {{ .Stats.MaxPlayers }}</div>
-                {{ if .Stats.Version }}<div class="pill" style="margin-top:6px;">Build: {{ .Stats.Version }}</div>{{ end }}
-                {{ if .Stats.Map }}<div class="pill" style="margin-top:6px;">Map: {{ .Stats.Map }}</div>{{ end }}
-              {{ else if .StatsErr }}
-                <div class="pill status-pill warn" style="margin-top:6px;">Query failed; retry later.</div>
-              {{ end }}
-            </div>
-          </div>
-        {{ else }}
-          <div class="status"><div class="dot down"></div><div>Unknown (backup API unreachable)</div></div>
-        {{ end }}
-      </div>
-      {{ if .LoggedIn }}
-        <div class="card">
-          <div class="title">Actions</div>
-          <div class="stack">
-            <form action="/action/restart" method="post"><button type="submit" class="danger">Restart</button></form>
-            <form action="/action/update" method="post"><button type="submit" class="danger">Trigger Update</button></form>
-            <form action="/action/backup" method="post"><button type="submit" class="danger">Backup Now</button></form>
-            <a class="ghost" href="/logs">Download Logs</a>
-          </div>
-        </div>
-      {{ end }}
-    </div>
-
-    {{ if .LoggedIn }}
-    <div class="card" style="margin-bottom:14px;">
-      <div class="title">Server Settings</div>
-      <form action="/action/server-config" method="post">
-        <input type="text" name="server_name" placeholder="Server name" value="{{ .ServerCfg.Name }}" />
-        <input type="password" name="server_password" placeholder="Server password (Friend group)" value="{{ .ServerCfg.ServerPassword }}" />
-        <label class="mode-toggle" style="width:100%; justify-content:space-between;">
-          <span>Max players</span>
-          <input type="number" name="slot_count" min="1" max="32" value="{{ if .ServerCfg.SlotCount }}{{ .ServerCfg.SlotCount }}{{ else }}16{{ end }}" style="max-width:100px;" />
-        </label>
-        <label class="mode-toggle" style="width:100%; justify-content:space-between;">
-          <span>Voice chat mode</span>
-          <select name="voice_chat_mode" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-            <option value="">(no change)</option>
-            <option value="Proximity" {{ if eq .ServerCfg.VoiceChatMode "Proximity" }}selected{{ end }}>Proximity</option>
-            <option value="Global" {{ if eq .ServerCfg.VoiceChatMode "Global" }}selected{{ end }}>Global</option>
-          </select>
-        </label>
-        <input type="hidden" name="enable_voice_chat" value="false" />
-        <label class="mode-toggle">
-          <input type="checkbox" name="enable_voice_chat" value="true" {{ if .ServerCfg.EnableVoiceChat }}checked{{ end }} />
-          <span>Enable voice chat</span>
-        </label>
-        <input type="hidden" name="enable_text_chat" value="false" />
-        <label class="mode-toggle">
-          <input type="checkbox" name="enable_text_chat" value="true" {{ if .ServerCfg.EnableTextChat }}checked{{ end }} />
-          <span>Enable text chat</span>
-        </label>
-        <div class="stack">
-          <input type="number" name="day_time_minutes" min="1" placeholder="Day duration (minutes)" value="{{ if .ServerCfg.DayTimeMinutes }}{{ .ServerCfg.DayTimeMinutes }}{{ end }}" />
-          <input type="number" name="night_time_minutes" min="1" placeholder="Night duration (minutes)" value="{{ if .ServerCfg.NightTimeMinutes }}{{ .ServerCfg.NightTimeMinutes }}{{ end }}" />
-        </div>
-        <input type="text" name="tags" placeholder="Tags (comma separated)" value="{{ if .ServerCfg.Tags }}{{ join .ServerCfg.Tags ", " }}{{ end }}" />
-        <div class="grid" style="margin-top:8px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));">
-          <div class="card">
-            <div class="title">Players</div>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Health factor (playerHealthFactor)</span>
-              <input type="number" step="0.1" name="gs_playerHealthFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "playerHealthFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Stamina factor (playerStaminaFactor)</span>
-              <input type="number" step="0.1" name="gs_playerStaminaFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "playerStaminaFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle">
-              <input type="checkbox" name="gs_enableDurability" value="true" {{ if eq (index .ServerCfg.GameSettings "enableDurability") true }}checked{{ end }} />
-              <span>Durability enabled</span>
-            </label>
-            <label class="mode-toggle">
-              <input type="checkbox" name="gs_enableStarvingDebuff" value="true" {{ if eq (index .ServerCfg.GameSettings "enableStarvingDebuff") true }}checked{{ end }} />
-              <span>Starving debuff</span>
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Food buff duration (foodBuffDurationFactor)</span>
-              <input type="number" step="0.1" name="gs_foodBuffDurationFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "foodBuffDurationFactor" }}" style="max-width:110px;" />
-            </label>
-          </div>
-          <div class="card">
-            <div class="title">Survival</div>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Shroud time (shroudTimeFactor)</span>
-              <input type="number" step="0.1" name="gs_shroudTimeFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "shroudTimeFactor" }}" style="max-width:110px;" />
-            </label>
-            <select name="gs_tombstoneMode" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-              <option value="">Tombstone mode (no change)</option>
-              <option value="AddBackpackMaterials" {{ if eq (index .ServerCfg.GameSettings "tombstoneMode") "AddBackpackMaterials" }}selected{{ end }}>Keep backpack materials</option>
-              <option value="DropBackpackMaterials" {{ if eq (index .ServerCfg.GameSettings "tombstoneMode") "DropBackpackMaterials" }}selected{{ end }}>Drop backpack materials</option>
-            </select>
-            <select name="gs_weatherFrequency" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-              <option value="">Weather frequency (no change)</option>
-              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "Low" }}selected{{ end }}>Low</option>
-              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "Normal" }}selected{{ end }}>Normal</option>
-              <option value="High" {{ if eq (index .ServerCfg.GameSettings "weatherFrequency") "High" }}selected{{ end }}>High</option>
-            </select>
-          </div>
-          <div class="card">
-            <div class="title">Enemies</div>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Enemy damage (enemyDamageFactor)</span>
-              <input type="number" step="0.1" name="gs_enemyDamageFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyDamageFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Enemy health (enemyHealthFactor)</span>
-              <input type="number" step="0.1" name="gs_enemyHealthFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyHealthFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Enemy perception (enemyPerceptionRangeFactor)</span>
-              <input type="number" step="0.1" name="gs_enemyPerceptionRangeFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "enemyPerceptionRangeFactor" }}" style="max-width:110px;" />
-            </label>
-            <select name="gs_randomSpawnerAmount" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-              <option value="">Spawner amount (no change)</option>
-              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "Low" }}selected{{ end }}>Low</option>
-              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "Normal" }}selected{{ end }}>Normal</option>
-              <option value="High" {{ if eq (index .ServerCfg.GameSettings "randomSpawnerAmount") "High" }}selected{{ end }}>High</option>
-            </select>
-            <select name="gs_aggroPoolAmount" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-              <option value="">Aggro pool (no change)</option>
-              <option value="Low" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "Low" }}selected{{ end }}>Low</option>
-              <option value="Normal" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "Normal" }}selected{{ end }}>Normal</option>
-              <option value="High" {{ if eq (index .ServerCfg.GameSettings "aggroPoolAmount") "High" }}selected{{ end }}>High</option>
-            </select>
-            <label class="mode-toggle">
-              <input type="checkbox" name="gs_pacifyAllEnemies" value="true" {{ if eq (index .ServerCfg.GameSettings "pacifyAllEnemies") true }}checked{{ end }} />
-              <span>Pacify all enemies</span>
-            </label>
-            <select name="gs_tamingStartleRepercussion" style="padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-              <option value="">Taming repercussion (no change)</option>
-              <option value="LoseSomeProgress" {{ if eq (index .ServerCfg.GameSettings "tamingStartleRepercussion") "LoseSomeProgress" }}selected{{ end }}>Lose some progress</option>
-              <option value="LoseAllProgress" {{ if eq (index .ServerCfg.GameSettings "tamingStartleRepercussion") "LoseAllProgress" }}selected{{ end }}>Lose all progress</option>
-            </select>
-          </div>
-          <div class="card">
-            <div class="title">Resources / Progression</div>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Mining damage (miningDamageFactor)</span>
-              <input type="number" step="0.1" name="gs_miningDamageFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "miningDamageFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Resource drop (resourceDropStackAmountFactor)</span>
-              <input type="number" step="0.1" name="gs_resourceDropStackAmountFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "resourceDropStackAmountFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Plant growth (plantGrowthSpeedFactor)</span>
-              <input type="number" step="0.1" name="gs_plantGrowthSpeedFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "plantGrowthSpeedFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Factory production (factoryProductionSpeedFactor)</span>
-              <input type="number" step="0.1" name="gs_factoryProductionSpeedFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "factoryProductionSpeedFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Perk recycling (perkUpgradeRecyclingFactor)</span>
-              <input type="number" step="0.1" name="gs_perkUpgradeRecyclingFactor" placeholder="0.5" value="{{ index .ServerCfg.GameSettings "perkUpgradeRecyclingFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Perk cost (perkCostFactor)</span>
-              <input type="number" step="0.1" name="gs_perkCostFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "perkCostFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Combat XP (experienceCombatFactor)</span>
-              <input type="number" step="0.1" name="gs_experienceCombatFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceCombatFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Mining XP (experienceMiningFactor)</span>
-              <input type="number" step="0.1" name="gs_experienceMiningFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceMiningFactor" }}" style="max-width:110px;" />
-            </label>
-            <label class="mode-toggle" style="justify-content:space-between;">
-              <span>Exploration XP (experienceExplorationQuestsFactor)</span>
-              <input type="number" step="0.1" name="gs_experienceExplorationQuestsFactor" placeholder="1.0" value="{{ index .ServerCfg.GameSettings "experienceExplorationQuestsFactor" }}" style="max-width:110px;" />
-            </label>
-          </div>
-        </div>
-        <div class="stack" style="margin-top:8px; gap:10px; flex-wrap:wrap;">
-          <button type="submit" class="danger">Save + Restart</button>
-          <button type="button" id="reset-defaults" class="ghost">Reset to default values</button>
-        </div>
-      </form>
-      <div class="pill" style="margin-top:6px;">
-        Changes apply on restart. Name/password are stored in the server config (not env) so they stay in sync with the running server.
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:14px;">
-      <div class="title">Restore</div>
-            <form action="/action/restore" method="post" class="stack">
-              <select id="restore-select" name="name" style="padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-                {{ range .Backups }}
-                  <option value="{{ .Key }}">{{ .Key }} ({{ .LastModified.Format "2006-01-02 15:04" }})</option>
-                {{ end }}
-              </select>
-              <button type="submit" class="danger">Restore</button>
-              <button type="button" id="preview-backup">Preview</button>
-              <label class="mode-toggle">
-                <input type="checkbox" name="backup_before" value="true" checked />
-                <span>Backup before restore</span>
-              </label>
-            </form>
-      <div id="backup-contents" class="pill" style="margin-top:8px; display:none; white-space:pre-wrap;"></div>
-            <form action="/action/upload" method="post" enctype="multipart/form-data" class="stack" style="margin-top:10px;">
-              <input type="file" name="file" required />
-              <label class="mode-toggle">
-                <input type="checkbox" name="backup_before" value="true" checked />
-                <span>Backup before restore</span>
-              </label>
-              <button type="submit" class="danger">Upload + Restore</button>
-            </form>
-          </div>
-    <script>
-      (function() {
-        const previewBtn = document.getElementById('preview-backup');
-        const select = document.getElementById('restore-select');
-        const output = document.getElementById('backup-contents');
-        if (!previewBtn || !select || !output) return;
-        previewBtn.addEventListener('click', async () => {
-          const name = select.value;
-          if (!name) {
-            output.style.display = 'block';
-            output.textContent = 'No backup selected.';
-            return;
-          }
-          output.style.display = 'block';
-          output.textContent = 'Loading preview...';
-          try {
-            const resp = await fetch('/backup/contents?name=' + encodeURIComponent(name));
-            if (!resp.ok) {
-              output.textContent = 'Preview failed.';
-              return;
-            }
-            const data = await resp.json();
-            const items = Array.isArray(data.items) ? data.items : [];
-            if (!items.length) {
-              output.textContent = 'No files listed.';
-              return;
-            }
-            output.textContent = items.join('\n');
-          } catch (err) {
-            output.textContent = 'Preview failed.';
-          }
-        });
-      })();
-      (function() {
-        const form = document.getElementById('groups-form');
-        if (!form) return;
-        form.addEventListener('submit', (e) => {
-          const fields = ['group_admin','group_friend','group_guest','group_visitor'];
-          const values = [];
-          fields.forEach(name => {
-            const el = form.querySelector('[name=\"' + name + '\"]');
-            const v = (el && el.value || '').trim();
-            if (v) values.push(v);
-          });
-          const unique = new Set(values);
-          if (values.length > unique.size) {
-            e.preventDefault();
-            alert('Group passwords must be unique. Please use different passwords for each group.');
-          }
-        });
-      })();
-      (function() {
-        const btn = document.getElementById('reset-defaults');
-        const form = btn ? btn.closest('form') : null;
-        if (!btn || !form) return;
-        const setVal = (name, value) => {
-          const el = form.querySelector('[name="' + name + '"]');
-          if (!el) return;
-          if (el.type === 'checkbox') {
-            el.checked = value === true || value === 'true';
-          } else {
-            el.value = value;
-          }
-        };
-        btn.addEventListener('click', () => {
-          const defaults = {
-            slot_count: 16,
-            voice_chat_mode: 'Proximity',
-            enable_voice_chat: true,
-            enable_text_chat: true,
-            game_settings_preset: 'Default',
-            day_time_minutes: 30,
-            night_time_minutes: 12,
-            gs_playerHealthFactor: '1',
-            gs_playerStaminaFactor: '1',
-            gs_enableDurability: true,
-            gs_enableStarvingDebuff: false,
-            gs_foodBuffDurationFactor: '1',
-            gs_shroudTimeFactor: '1',
-            gs_tombstoneMode: 'AddBackpackMaterials',
-            gs_weatherFrequency: 'Normal',
-            gs_enemyDamageFactor: '1',
-            gs_enemyHealthFactor: '1',
-            gs_enemyPerceptionRangeFactor: '1',
-            gs_randomSpawnerAmount: 'Normal',
-            gs_aggroPoolAmount: 'Normal',
-            gs_pacifyAllEnemies: false,
-            gs_tamingStartleRepercussion: 'LoseSomeProgress',
-            gs_miningDamageFactor: '1',
-            gs_resourceDropStackAmountFactor: '1',
-            gs_plantGrowthSpeedFactor: '1',
-            gs_factoryProductionSpeedFactor: '1',
-            gs_perkUpgradeRecyclingFactor: '0.5',
-            gs_perkCostFactor: '1',
-            gs_experienceCombatFactor: '1',
-            gs_experienceMiningFactor: '1',
-            gs_experienceExplorationQuestsFactor: '1',
-          };
-          Object.keys(defaults).forEach(k => setVal(k, defaults[k]));
-          alert('Default values applied. Click "Save + Restart" to apply.');
-        });
-      })();
-    </script>
-
-    <div class="card" style="margin-bottom:14px;">
-      <div class="title">Savegame Import / Export</div>
-      <ul class="howto">
-        <li>Export: click <strong>Backup Now</strong> (or wait for the schedule). Backups are stored in the S3/MinIO bucket.</li>
-        <li>Download: use the Backups table or the MinIO console (port 9001) with your bucket credentials.</li>
-        <li>Import: upload a <code>.tar.gz</code> or <code>.zip</code> of your savegame folder (files at archive root). The server stops, restores, and restarts.</li>
-        <li>Tip: take a fresh backup before restore and avoid restores while players are online.</li>
-      </ul>
-    </div>
-
-    <div class="card" style="margin-bottom:14px;">
-      <div class="title">Access Groups</div>
-      <form id="groups-form" action="/action/groups" method="post">
-        <input type="password" name="group_admin" placeholder="Admin group password (optional)" />
-        <input type="password" name="group_friend" placeholder="Friend group password (recommended)" />
-        <input type="password" name="group_guest" placeholder="Guest group password (optional)" />
-        <input type="password" name="group_visitor" placeholder="Visitor group password (optional)" />
-        <button type="submit" class="danger">Save + Restart</button>
-      </form>
-      <div class="pill" style="margin-top:6px;">
-        Leave fields blank to keep them unchanged. Players typically join with the Friend group password.
-        Passwords must be unique across groups.
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="title">Backups</div>
-      <div style="overflow-x:auto;">
-        <table>
-          <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Download</th></tr></thead>
-          <tbody>
-          {{ if .Backups }}
-            {{ range .Backups }}
-              <tr>
-                <td>{{ .Key }}</td>
-                <td>{{ formatBytes .Size }}</td>
-                <td>{{ .LastModified.Format "2006-01-02 15:04" }}</td>
-                <td><a class="ghost" href="/backup/download?name={{ .Key }}">Download</a></td>
-              </tr>
-            {{ end }}
-          {{ else }}
-            <tr><td colspan="4">No backups yet.</td></tr>
-          {{ end }}
-          </tbody>
-        </table>
-      </div>
-    </div>
-    {{ end }}
-
-    {{ if .LoggedIn }}
-    <div class="card" style="margin-top:14px;">
-      <div class="title">Steam Authentication</div>
-      {{ if .SteamState }}
-        <div class="status" style="margin-bottom:10px;">
-          {{ if eq .SteamState.Mode "user" }}<div class="dot ok"></div>{{ else if eq .SteamState.Mode "anonymous" }}<div class="dot ok"></div>{{ else }}<div class="dot down"></div>{{ end }}
-          <div>
-            <div class="pill status-pill {{ if eq .SteamState.Mode "unset" }}warn{{ end }}">
-              Mode: {{ .SteamState.Mode }}
-              {{ if and (eq .SteamState.Mode "user") .SteamState.Username }} · User: {{ .SteamState.Username }}{{ end }}
-            </div>
-            {{ with .SteamState.LastError }}<div class="pill status-pill warn" style="margin-top:6px;">Last error: {{ . }}</div>{{ end }}
-            {{ if eq .SteamState.Mode "unset" }}<div class="pill status-pill warn" style="margin-top:6px;">Select a login mode to start the server.</div>{{ end }}
-          </div>
-        </div>
-      {{ end }}
-      <form id="steam-mode-form" action="/action/steam-auth" method="post" style="margin-top:10px;">
-        <div class="stack" style="margin-bottom:10px;">
-          <label class="mode-toggle">
-            <input type="radio" name="steam_mode" value="anonymous" {{if or (eq .SteamState.Mode "anonymous") (eq .SteamState.Mode "unset")}}checked{{end}} />
-            <span>Anonymous</span>
-          </label>
-          <label class="mode-toggle">
-            <input type="radio" name="steam_mode" value="user" {{if eq .SteamState.Mode "user"}}checked{{end}} />
-            <span>Use Steam login</span>
-          </label>
-        </div>
-        <div id="steam-credentials" {{if or (eq .SteamState.Mode "anonymous") (eq .SteamState.Mode "unset")}}style="display:none"{{end}}>
-          <input type="text" name="steam_username" placeholder="Steam username" value="{{ .SteamState.Username }}" />
-          <input type="password" name="steam_password" placeholder="Steam password" />
-          <input type="text" name="steam_guard" placeholder="Steam Guard code (if prompted)" />
-        </div>
-        <button type="submit">Save and Restart</button>
-        <div class="pill" style="margin-top:6px;">
-          Choose anonymous to clear saved creds, or enter login details (with Guard code) to authenticate. Restart is automatic.
-        </div>
-        {{ if eq .SteamState.Mode "unset" }}<div class="pill" style="margin-top:6px; border-color:#f97316; color:#f97316;">Select a login mode to start the server.</div>{{ end }}
-      </form>
-      <script>
-        (function() {
-          const form = document.getElementById('steam-mode-form');
-          if (!form) return;
-          const radios = form.querySelectorAll('input[name="steam_mode"]');
-          const creds = document.getElementById('steam-credentials');
-          const update = () => {
-            const mode = form.querySelector('input[name="steam_mode"]:checked')?.value || 'anonymous';
-            creds.style.display = mode === 'user' ? 'block' : 'none';
-            ['steam_username','steam_password'].forEach(id => {
-              const input = form.querySelector('[name="' + id + '"]');
-              if (input) input.required = (mode === 'user');
-            });
-          };
-          radios.forEach(r => r.addEventListener('change', update));
-          update();
-          form.addEventListener('submit', () => {
-            const mode = form.querySelector('input[name="steam_mode"]:checked')?.value || 'anonymous';
-            form.action = (mode === 'anonymous') ? '/action/steam-anon' : '/action/steam-auth';
-          });
-        })();
-      </script>
-    </div>
-    {{ end }}
-  </div>
-</body>
-</html>`
+//go:embed templates/page.html
+var pageTemplate string
 
 func formatBytes(n int64) string {
 	const unit = 1024

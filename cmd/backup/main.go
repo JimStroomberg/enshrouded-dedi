@@ -7,20 +7,21 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -51,6 +52,17 @@ type Config struct {
 	MaxExtractFiles     int
 	MaxExtractBytes     int64
 	HealthTimeout       time.Duration
+	InternalToken       string
+	DockerToken         string
+	AllowInsecure       bool
+	AuditPath           string
+	WebhookURL          string
+	A2SAddr             string
+	A2STimeout          time.Duration
+	RestartRequireEmpty bool
+	MaintenanceWindow   string
+	PlayerNotifications bool
+	PlayerPollInterval  time.Duration
 }
 
 func getenv(key, def string) string {
@@ -192,6 +204,8 @@ type BackupService struct {
 	docker      *dockerClient
 	logger      *log.Logger
 	operationMu sync.Mutex
+	jobs        *jobManager
+	startedAt   time.Time
 }
 
 func main() {
@@ -220,12 +234,27 @@ func main() {
 		LogLevel:            strings.ToLower(getenv("BACKUP_LOG_LEVEL", "info")),
 		MaxExtractFiles:     atoiEnv("BACKUP_MAX_EXTRACT_FILES", 10000),
 		MaxExtractBytes:     atoi64Env("BACKUP_MAX_EXTRACT_BYTES", 4<<30),
-		HealthTimeout:       time.Duration(atoiEnv("BACKUP_HEALTH_TIMEOUT_SECONDS", 180)) * time.Second,
+		HealthTimeout:       time.Duration(atoiEnv("BACKUP_HEALTH_TIMEOUT_SECONDS", 900)) * time.Second,
+		InternalToken:       getenv("BACKUP_INTERNAL_TOKEN", ""),
+		DockerToken:         getenv("DOCKER_CONTROLLER_TOKEN", ""),
+		AllowInsecure:       parseBoolEnv("ALLOW_INSECURE_DEFAULTS", false),
+		AuditPath:           getenv("BACKUP_AUDIT_PATH", "/data/control/audit.jsonl"),
+		WebhookURL:          getenv("BACKUP_NOTIFICATION_WEBHOOK_URL", ""),
+		A2SAddr:             getenv("BACKUP_A2S_ADDR", "enshrouded:15637"),
+		A2STimeout:          time.Duration(atoiEnv("BACKUP_A2S_TIMEOUT_MS", 2000)) * time.Millisecond,
+		RestartRequireEmpty: parseBoolEnv("BACKUP_RESTART_REQUIRE_EMPTY", false),
+		MaintenanceWindow:   getenv("BACKUP_MAINTENANCE_WINDOW", ""),
+		PlayerNotifications: parseBoolEnv("BACKUP_PLAYER_NOTIFICATIONS", false),
+		PlayerPollInterval:  time.Duration(atoiEnv("BACKUP_PLAYER_POLL_SECONDS", 60)) * time.Second,
 	}
 
 	logger := log.New(os.Stdout, "backup ", log.LstdFlags|log.Lmsgprefix)
+	if err := validateBackupConfig(cfg); err != nil {
+		logger.Fatalf("invalid backup configuration: %v", err)
+	}
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	s3Client, err := minio.New(cfg.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
@@ -235,9 +264,10 @@ func main() {
 		logger.Fatalf("minio init: %v", err)
 	}
 
-	dockerClient := newDockerClient(getenv("DOCKER_HOST", "/var/run/docker.sock"))
+	dockerClient := newDockerClient(getenv("DOCKER_HOST", "/var/run/docker.sock"), cfg.DockerToken)
 
-	svc := &BackupService{cfg: cfg, s3: s3Client, docker: dockerClient, logger: logger}
+	svc := &BackupService{cfg: cfg, s3: s3Client, docker: dockerClient, logger: logger, startedAt: time.Now().UTC()}
+	svc.jobs = newJobManager(ctx, logger, cfg.AuditPath, cfg.WebhookURL)
 
 	if err := svc.ensureBucket(ctx); err != nil {
 		logger.Printf("warn: unable to verify bucket %s: %v", cfg.Bucket, err)
@@ -246,12 +276,17 @@ func main() {
 	if cfg.IntervalHours > 0 {
 		go svc.startScheduler(ctx)
 	}
+	if cfg.PlayerNotifications && cfg.WebhookURL != "" {
+		go svc.startPlayerMonitor(ctx)
+	}
 
 	r := mux.NewRouter()
 	r.HandleFunc("/health", svc.handleHealth).Methods(http.MethodGet)
+	r.HandleFunc("/ready", svc.handleReady).Methods(http.MethodGet)
 	r.HandleFunc("/backups", svc.handleListBackups).Methods(http.MethodGet)
 	r.HandleFunc("/backups/download", svc.handleDownloadBackup).Methods(http.MethodGet)
 	r.HandleFunc("/backups/contents", svc.handleBackupContents).Methods(http.MethodGet)
+	r.HandleFunc("/backups/preview", svc.handleBackupPreview).Methods(http.MethodGet)
 	r.HandleFunc("/backup", svc.handleCreateBackup).Methods(http.MethodPost)
 	r.HandleFunc("/restore", svc.handleRestoreBackup).Methods(http.MethodPost)
 	r.HandleFunc("/upload", svc.handleUploadRestore).Methods(http.MethodPost)
@@ -265,9 +300,31 @@ func main() {
 	r.HandleFunc("/steam/auth", svc.handleSteamAuth).Methods(http.MethodPost)
 	r.HandleFunc("/steam/anonymous", svc.handleSteamAnonymous).Methods(http.MethodPost)
 	r.HandleFunc("/steam/state", svc.handleSteamState).Methods(http.MethodGet)
+	r.HandleFunc("/jobs", svc.handleListJobs).Methods(http.MethodGet)
+	r.HandleFunc("/jobs/{id}", svc.handleGetJob).Methods(http.MethodGet)
+	r.HandleFunc("/operations/status", svc.handleOperationsStatus).Methods(http.MethodGet)
+	r.HandleFunc("/diagnostics", svc.handleDiagnostics).Methods(http.MethodGet)
+	r.HandleFunc("/metrics", svc.handleMetrics).Methods(http.MethodGet)
+
+	httpServer := &http.Server{
+		Addr:              cfg.BindAddr,
+		Handler:           svc.requireInternalToken(r),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Minute,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			logger.Printf("http shutdown error: %v", err)
+		}
+	}()
 
 	logger.Printf("listening on %s", cfg.BindAddr)
-	if err := http.ListenAndServe(cfg.BindAddr, r); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Fatalf("http server failed: %v", err)
 	}
 }
@@ -286,6 +343,19 @@ func (s *BackupService) ensureBucket(ctx context.Context) error {
 func (s *BackupService) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprint(w, `{"status":"ok"}`)
+}
+
+func (s *BackupService) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, s.jobs.list(atoiQuery(r, "limit", 20)))
+}
+
+func (s *BackupService) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	item, ok := s.jobs.get(mux.Vars(r)["id"])
+	if !ok {
+		respondError(w, http.StatusNotFound, errors.New("job not found"))
+		return
+	}
+	respondJSON(w, item)
 }
 
 func (s *BackupService) handleListBackups(w http.ResponseWriter, r *http.Request) {
@@ -348,17 +418,21 @@ func (s *BackupService) handleBackupContents(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *BackupService) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	name, err := s.createBackup(ctx)
+	item, err := s.jobs.enqueue("backup", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		name, err := s.createBackup(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"name": name}, nil
+	})
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	respondJSON(w, map[string]string{"name": name})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	type payload struct {
 		Name         string `json:"name"`
 		BackupBefore bool   `json:"backup_before"`
@@ -368,15 +442,20 @@ func (s *BackupService) handleRestoreBackup(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusBadRequest, errors.New("name required"))
 		return
 	}
-	if err := s.restoreBackup(ctx, p.Name, p.BackupBefore); err != nil {
+	item, err := s.jobs.enqueue("restore", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		if err := s.restoreBackup(ctx, p.Name, p.BackupBefore); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"restored": p.Name}, nil
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	respondJSON(w, map[string]string{"restored": p.Name})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) handleUploadRestore(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20) // 512MB limit
 	if err := r.ParseMultipartForm(512 << 20); err != nil {
 		respondError(w, http.StatusBadRequest, fmt.Errorf("invalid upload: %w", err))
@@ -389,11 +468,47 @@ func (s *BackupService) handleUploadRestore(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer file.Close()
-	if err := s.uploadAndRestore(ctx, header.Filename, file, backupBefore); err != nil {
+	uploadDir := filepath.Join(filepath.Dir(s.cfg.AuditPath), "uploads")
+	if err := os.MkdirAll(uploadDir, 0o700); err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	respondJSON(w, map[string]string{"restored": header.Filename})
+	staged, err := os.CreateTemp(uploadDir, "restore-upload-*")
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	stagedPath := staged.Name()
+	if _, err := io.Copy(staged, file); err != nil {
+		staged.Close()
+		_ = os.Remove(stagedPath)
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := staged.Close(); err != nil {
+		_ = os.Remove(stagedPath)
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	filename := filepath.Base(header.Filename)
+	item, err := s.jobs.enqueue("upload_restore", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		defer os.Remove(stagedPath)
+		input, err := os.Open(stagedPath)
+		if err != nil {
+			return nil, err
+		}
+		defer input.Close()
+		if err := s.uploadAndRestore(ctx, filename, input, backupBefore); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"restored": filename}, nil
+	})
+	if err != nil {
+		_ = os.Remove(stagedPath)
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -444,19 +559,31 @@ func (s *BackupService) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *BackupService) handleRestartServer(w http.ResponseWriter, r *http.Request) {
-	if err := s.restartContainer(r.Context()); err != nil {
+	item, err := s.jobs.enqueue("restart", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		if err := s.checkRestartPolicy(ctx, false); err != nil {
+			return nil, err
+		}
+		return nil, s.restartAndWait(ctx)
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	respondJSON(w, map[string]string{"status": "restarting"})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
-	if err := s.restartContainer(r.Context()); err != nil {
+	item, err := s.jobs.enqueue("update", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		if err := s.checkRestartPolicy(ctx, true); err != nil {
+			return nil, err
+		}
+		return nil, s.restartAndWait(ctx)
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	respondJSON(w, map[string]string{"status": "update-triggered"})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) handleUpdateGroupPasswords(w http.ResponseWriter, r *http.Request) {
@@ -495,19 +622,20 @@ func (s *BackupService) handleUpdateGroupPasswords(w http.ResponseWriter, r *htt
 		return
 	}
 
-	if err := s.stopContainer(r.Context()); err != nil {
-		s.logger.Printf("warn: stop container: %v", err)
-	}
-	if err := s.updateGroupPasswords(updates); err != nil {
-		_ = s.startContainer(r.Context())
+	item, err := s.jobs.enqueue("group_config", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		if err := s.checkRestartPolicy(ctx, false); err != nil {
+			return nil, err
+		}
+		if err := s.applyConfigTransaction(ctx, func() error { return s.updateGroupPasswords(updates) }); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"updated": true}, nil
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.startContainer(r.Context()); err != nil {
-		respondError(w, http.StatusInternalServerError, err)
-		return
-	}
-	respondJSON(w, map[string]string{"status": "updated"})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 type serverConfigView struct {
@@ -520,7 +648,6 @@ type serverConfigView struct {
 	GameSettingsPreset string                 `json:"game_settings_preset"`
 	DayTimeMinutes     int                    `json:"day_time_minutes"`
 	NightTimeMinutes   int                    `json:"night_time_minutes"`
-	ServerPassword     string                 `json:"server_password"`
 	GameSettings       map[string]interface{} `json:"game_settings,omitempty"`
 }
 
@@ -553,15 +680,20 @@ func (s *BackupService) handleUpdateServerConfig(w http.ResponseWriter, r *http.
 		respondError(w, http.StatusBadRequest, fmt.Errorf("invalid payload: %w", err))
 		return
 	}
-	if err := s.updateServerConfig(&p); err != nil {
+	item, err := s.jobs.enqueue("server_config", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		if err := s.checkRestartPolicy(ctx, false); err != nil {
+			return nil, err
+		}
+		if err := s.applyConfigTransaction(ctx, func() error { return s.updateServerConfig(&p) }); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"updated": true}, nil
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.restartContainer(r.Context()); err != nil {
-		respondError(w, http.StatusInternalServerError, err)
-		return
-	}
-	respondJSON(w, map[string]string{"status": "updated"})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -588,17 +720,17 @@ func (s *BackupService) handleSteamAuth(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusBadRequest, errors.New("username and password required"))
 		return
 	}
-	if err := s.writeSteamAuthFile(p.Username, p.Password, p.GuardCode); err != nil {
+	item, err := s.jobs.enqueue("steam_auth_restart", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		if err := s.writeSteamAuthFile(p.Username, p.Password, p.GuardCode); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"stored": true}, s.restartAndWait(ctx)
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	// Kick off a quick restart so the guard code is used immediately.
-	go func() {
-		if err := s.restartContainer(context.Background()); err != nil {
-			s.logger.Printf("steam auth: restart failed: %v", err)
-		}
-	}()
-	respondJSON(w, map[string]string{"status": "stored"})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) handleSteamState(w http.ResponseWriter, r *http.Request) {
@@ -611,23 +743,25 @@ func (s *BackupService) handleSteamState(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *BackupService) handleSteamAnonymous(w http.ResponseWriter, r *http.Request) {
-	if err := s.writeSteamAnonymous(); err != nil {
+	item, err := s.jobs.enqueue("steam_anonymous_restart", "ui", func(ctx context.Context) (map[string]interface{}, error) {
+		if err := s.writeSteamAnonymous(); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"anonymous": true}, s.restartAndWait(ctx)
+	})
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
-	go func() {
-		if err := s.restartContainer(context.Background()); err != nil {
-			s.logger.Printf("steam anonymous: restart failed: %v", err)
-		}
-	}()
-	respondJSON(w, map[string]string{"status": "anonymous"})
+	respondJSONStatus(w, http.StatusAccepted, item)
 }
 
 func (s *BackupService) writeSteamAuthFile(user, pass, guard string) error {
 	authPath := s.steamAuthPath()
-	content := fmt.Sprintf("STEAM_CHOSEN=1\nSTEAM_LOGIN=user\nSTEAM_USERNAME=%s\nSTEAM_PASSWORD=%s\n", user, pass)
+	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	content := fmt.Sprintf("STEAM_CHOSEN=1\nSTEAM_LOGIN=user\nSTEAM_USERNAME_B64=%s\nSTEAM_PASSWORD_B64=%s\n", encode(user), encode(pass))
 	if strings.TrimSpace(guard) != "" {
-		content += fmt.Sprintf("STEAM_GUARD_CODE=%s\n", guard)
+		content += fmt.Sprintf("STEAM_GUARD_CODE_B64=%s\n", encode(guard))
 	}
 	if err := os.WriteFile(authPath, []byte(content), 0o600); err != nil {
 		return err
@@ -692,10 +826,21 @@ func (s *BackupService) readSteamState() (*steamState, error) {
 		if strings.HasPrefix(ln, "STEAM_USERNAME=") {
 			state.Username = strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_USERNAME="))
 		}
+		if strings.HasPrefix(ln, "STEAM_USERNAME_B64=") {
+			if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_USERNAME_B64="))); err == nil {
+				state.Username = string(decoded)
+			}
+		}
 		if strings.HasPrefix(ln, "STEAM_PASSWORD=") && strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_PASSWORD=")) != "" {
 			state.HasCreds = true
 		}
+		if strings.HasPrefix(ln, "STEAM_PASSWORD_B64=") && strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_PASSWORD_B64=")) != "" {
+			state.HasCreds = true
+		}
 		if strings.HasPrefix(ln, "STEAM_GUARD_CODE=") && strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_GUARD_CODE=")) != "" {
+			state.GuardHint = true
+		}
+		if strings.HasPrefix(ln, "STEAM_GUARD_CODE_B64=") && strings.TrimSpace(strings.TrimPrefix(ln, "STEAM_GUARD_CODE_B64=")) != "" {
 			state.GuardHint = true
 		}
 	}
@@ -741,6 +886,9 @@ func (s *BackupService) listBackups(ctx context.Context) ([]minio.ObjectInfo, er
 	for obj := range s.s3.ListObjects(ctx, s.cfg.Bucket, minio.ListObjectsOptions{Recursive: true}) {
 		if obj.Err != nil {
 			return nil, obj.Err
+		}
+		if !isSafeBackupName(obj.Key) {
+			continue
 		}
 		items = append(items, obj)
 	}
@@ -861,7 +1009,9 @@ func (s *BackupService) snapshotCurrent(ctx context.Context, now time.Time) (sta
 		if !stoppedByUs {
 			return
 		}
-		if startErr := s.startContainer(context.Background()); startErr != nil {
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if startErr := s.startContainer(recoveryCtx); startErr != nil {
 			err = errors.Join(err, fmt.Errorf("restart game container after snapshot: %w", startErr))
 		}
 	}()
@@ -941,12 +1091,19 @@ func (s *BackupService) uploadAndRestore(ctx context.Context, filename string, r
 
 func (s *BackupService) startScheduler(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(s.cfg.IntervalHours) * time.Hour)
+	defer ticker.Stop()
 	s.logger.Printf("automatic backups every %d hour(s)", s.cfg.IntervalHours)
 	for {
 		select {
 		case <-ticker.C:
-			if _, err := s.createBackup(ctx); err != nil {
-				s.logger.Printf("scheduled backup failed: %v", err)
+			if _, err := s.jobs.enqueue("backup", "scheduler", func(jobCtx context.Context) (map[string]interface{}, error) {
+				name, err := s.createBackup(jobCtx)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]interface{}{"name": name}, nil
+			}); err != nil {
+				s.logger.Printf("scheduled backup enqueue failed: %v", err)
 			}
 		case <-ctx.Done():
 			return
@@ -956,6 +1113,24 @@ func (s *BackupService) startScheduler(ctx context.Context) {
 
 func (s *BackupService) restartContainer(ctx context.Context) error {
 	return s.docker.post(ctx, fmt.Sprintf("/containers/%s/restart?t=10", s.cfg.EnshroudedContainer), nil)
+}
+
+func (s *BackupService) restartAndWait(ctx context.Context) error {
+	if err := s.restartContainer(ctx); err != nil {
+		return err
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, s.cfg.HealthTimeout)
+	defer cancel()
+	return s.waitContainerHealthy(healthCtx)
+}
+
+func (s *BackupService) startAndWait(ctx context.Context) error {
+	if err := s.startContainer(ctx); err != nil {
+		return err
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, s.cfg.HealthTimeout)
+	defer cancel()
+	return s.waitContainerHealthy(healthCtx)
 }
 
 func (s *BackupService) stopContainer(ctx context.Context) error {
@@ -1018,51 +1193,9 @@ func (s *BackupService) applyRetention(ctx context.Context) error {
 		return nil
 	}
 
-	// Sort newest first
-	sort.Slice(items, func(i, j int) bool { return items[i].LastModified.After(items[j].LastModified) })
-
-	keep := map[string]bool{}
-	dailyCount := 0
-	weeklyCount := 0
-	monthlyCount := 0
-
-	seenDay := map[string]bool{}
-	seenWeek := map[string]bool{}
-	seenMonth := map[string]bool{}
-
-	for _, obj := range items {
-		ts, err := parseTimestamp(obj.Key)
-		if err != nil {
-			// Never prune objects we cannot classify. This protects manually
-			// uploaded or legacy archives from accidental deletion.
-			keep[obj.Key] = true
-			s.logger.Printf("retention: keeping unrecognized object %s: %v", obj.Key, err)
-			continue
-		}
-		dayKey := ts.Format("2006-01-02")
-		year, week := ts.ISOWeek()
-		weekKey := fmt.Sprintf("%d-%02d", year, week)
-		monthKey := ts.Format("2006-01")
-
-		if dailyCount < s.cfg.RetentionDailies && !seenDay[dayKey] {
-			keep[obj.Key] = true
-			seenDay[dayKey] = true
-			dailyCount++
-			continue
-		}
-		if weeklyCount < s.cfg.RetentionWeeklies && !seenWeek[weekKey] {
-			keep[obj.Key] = true
-			seenWeek[weekKey] = true
-			weeklyCount++
-			continue
-		}
-		if monthlyCount < s.cfg.RetentionMonthlies && !seenMonth[monthKey] {
-			keep[obj.Key] = true
-			seenMonth[monthKey] = true
-			monthlyCount++
-			continue
-		}
-	}
+	keep := selectRetention(items, s.cfg.RetentionDailies, s.cfg.RetentionWeeklies, s.cfg.RetentionMonthlies, func(name string, err error) {
+		s.logger.Printf("retention: keeping unrecognized object %s: %v", name, err)
+	})
 
 	for _, obj := range items {
 		if keep[obj.Key] {
@@ -1649,18 +1782,6 @@ func (s *BackupService) readServerConfig() (*serverConfigView, error) {
 			view.NightTimeMinutes = int(v / int64(time.Minute))
 		}
 	}
-	if groups, ok := doc["userGroups"].([]interface{}); ok {
-		for _, g := range groups {
-			group, ok := g.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			name := strings.ToLower(asString(group["name"]))
-			if name == "friend" {
-				view.ServerPassword = asString(group["password"])
-			}
-		}
-	}
 	return view, nil
 }
 
@@ -1916,10 +2037,22 @@ func respondError(w http.ResponseWriter, status int, err error) {
 }
 
 func respondJSON(w http.ResponseWriter, payload interface{}) {
+	respondJSONStatus(w, http.StatusOK, payload)
+}
+
+func respondJSONStatus(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(true)
 	_ = enc.Encode(payload)
+}
+
+func atoiQuery(r *http.Request, key string, fallback int) int {
+	if value, err := strconv.Atoi(r.URL.Query().Get(key)); err == nil {
+		return value
+	}
+	return fallback
 }
 
 func sanitizeError(err error) string {
@@ -1934,60 +2067,4 @@ func decodeJSON(r *http.Request, out interface{}) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	return dec.Decode(out)
-}
-
-type dockerClient struct {
-	http *http.Client
-}
-
-func newDockerClient(socket string) *dockerClient {
-	if socket == "" {
-		socket = "/var/run/docker.sock"
-	}
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			d := net.Dialer{}
-			return d.DialContext(ctx, "unix", socket)
-		},
-	}
-	return &dockerClient{
-		http: &http.Client{Transport: transport},
-	}
-}
-
-func (d *dockerClient) post(ctx context.Context, path string, body io.Reader) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+path, body)
-	if err != nil {
-		return err
-	}
-	resp, err := d.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("docker %s: %s", path, strings.TrimSpace(string(msg)))
-	}
-	return nil
-}
-
-func (d *dockerClient) get(ctx context.Context, path string, out interface{}) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := d.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("docker %s: %s", path, strings.TrimSpace(string(msg)))
-	}
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
 }

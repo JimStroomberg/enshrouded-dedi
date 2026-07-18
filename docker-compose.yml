@@ -1,11 +1,20 @@
 services:
   enshrouded:
-    image: powermountain/enshrouded-dedi-server:latest
+    image: ${SERVER_IMAGE:-powermountain/enshrouded-dedi-server:latest}
     platform: linux/amd64
     build:
       context: ./docker/enshrouded
-    container_name: enshrouded
+    container_name: ${ENSHROUDED_CONTAINER_NAME:-enshrouded}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${SERVER_MEMORY_LIMIT:-16g}
+    cpus: ${SERVER_CPU_LIMIT:-6}
     env_file: .env
     environment:
       SERVER_NAME: ${SERVER_NAME}
@@ -18,21 +27,21 @@ services:
     volumes:
       - enshrouded_data:/data
     ports:
-      - "${GAME_PORT:-15636}:15636/udp"
-      - "${GAME_PORT:-15636}:15636/tcp"
-      - "${QUERY_PORT:-15637}:15637/udp"
-      - "${QUERY_PORT:-15637}:15637/tcp"
+      - "${GAME_HOST_PORT:-15636}:${GAME_PORT:-15636}/udp"
+      - "${GAME_HOST_PORT:-15636}:${GAME_PORT:-15636}/tcp"
+      - "${QUERY_HOST_PORT:-15637}:${QUERY_PORT:-15637}/udp"
+      - "${QUERY_HOST_PORT:-15637}:${QUERY_PORT:-15637}/tcp"
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f enshrouded_server || ss -lntu | grep -q 15636" ]
+      test: ["CMD", "python3", "/healthcheck.py"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 10m
     networks:
       - enshrouded_net
 
   backup:
-    image: powermountain/enshrouded-dedi-backup:latest
+    image: ${BACKUP_IMAGE:-powermountain/enshrouded-dedi-backup:latest}
     platform: linux/amd64
     build:
       context: .
@@ -48,7 +57,7 @@ services:
       BACKUP_STEAM_APP_MANIFEST: ${BACKUP_STEAM_APP_MANIFEST:-/data/server/steamapps/appmanifest_2278520.acf}
       BACKUP_MAX_EXTRACT_FILES: ${BACKUP_MAX_EXTRACT_FILES:-10000}
       BACKUP_MAX_EXTRACT_BYTES: ${BACKUP_MAX_EXTRACT_BYTES:-4294967296}
-      BACKUP_HEALTH_TIMEOUT_SECONDS: ${BACKUP_HEALTH_TIMEOUT_SECONDS:-180}
+      BACKUP_HEALTH_TIMEOUT_SECONDS: ${BACKUP_HEALTH_TIMEOUT_SECONDS:-900}
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
       BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY}
       BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY}
@@ -61,17 +70,39 @@ services:
       BACKUP_BIND_ADDR: ${BACKUP_BIND_ADDR}
       ENSHROUDED_CONTAINER_NAME: ${ENSHROUDED_CONTAINER_NAME}
       BACKUP_LOG_LEVEL: ${BACKUP_LOG_LEVEL}
+      BACKUP_AUDIT_PATH: ${BACKUP_AUDIT_PATH:-/data/control/audit.jsonl}
+      BACKUP_NOTIFICATION_WEBHOOK_URL: ${BACKUP_NOTIFICATION_WEBHOOK_URL:-}
+      BACKUP_A2S_ADDR: ${BACKUP_A2S_ADDR:-enshrouded:15637}
+      BACKUP_A2S_TIMEOUT_MS: ${BACKUP_A2S_TIMEOUT_MS:-2000}
+      BACKUP_RESTART_REQUIRE_EMPTY: ${BACKUP_RESTART_REQUIRE_EMPTY:-false}
+      BACKUP_MAINTENANCE_WINDOW: ${BACKUP_MAINTENANCE_WINDOW:-}
+      BACKUP_PLAYER_NOTIFICATIONS: ${BACKUP_PLAYER_NOTIFICATIONS:-false}
+      BACKUP_PLAYER_POLL_SECONDS: ${BACKUP_PLAYER_POLL_SECONDS:-60}
+      BACKUP_INTERNAL_TOKEN: ${BACKUP_INTERNAL_TOKEN}
+      DOCKER_CONTROLLER_TOKEN: ${DOCKER_CONTROLLER_TOKEN}
+      DOCKER_HOST: http://controller:2375
+      ALLOW_INSECURE_DEFAULTS: ${ALLOW_INSECURE_DEFAULTS:-false}
       TZ: ${TZ}
     volumes:
       - enshrouded_data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${BACKUP_MEMORY_LIMIT:-1g}
+    cpus: ${BACKUP_CPU_LIMIT:-1}
     depends_on:
       enshrouded:
         condition: service_started
       minio:
         condition: service_healthy
+      controller:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:7000/ready"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -80,7 +111,7 @@ services:
       - enshrouded_net
 
   ui:
-    image: powermountain/enshrouded-dedi-ui:latest
+    image: ${UI_IMAGE:-powermountain/enshrouded-dedi-ui:latest}
     platform: linux/amd64
     build:
       context: .
@@ -92,15 +123,29 @@ services:
       UI_ADMIN_USERNAME: ${UI_ADMIN_USERNAME}
       UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD}
       UI_SESSION_SECRET: ${UI_SESSION_SECRET}
+      UI_SESSION_ENCRYPTION_KEY: ${UI_SESSION_ENCRYPTION_KEY}
+      UI_CSRF_KEY: ${UI_CSRF_KEY}
+      UI_SECURE_COOKIES: ${UI_SECURE_COOKIES:-false}
+      UI_INTERNAL_TOKEN: ${BACKUP_INTERNAL_TOKEN}
+      ALLOW_INSECURE_DEFAULTS: ${ALLOW_INSECURE_DEFAULTS:-false}
       BACKUP_API_URL: ${BACKUP_API_URL}
       TZ: ${TZ}
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${UI_MEMORY_LIMIT:-256m}
+    cpus: ${UI_CPU_LIMIT:-0.5}
     ports:
-      - "8080:8080"
+      - "${UI_HOST_BIND:-0.0.0.0}:${UI_HOST_PORT:-8080}:8080"
     depends_on:
       backup:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ready"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -116,12 +161,21 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      MINIO_BROWSER_REDIRECT_URL: http://localhost:9001
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-http://localhost:9001}
       MINIO_REGION: ${MINIO_REGION}
     volumes:
       - minio_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${MINIO_MEMORY_LIMIT:-2g}
+    cpus: ${MINIO_CPU_LIMIT:-2}
     ports:
-      - "127.0.0.1:9001:9001"
+      - "${MINIO_CONSOLE_HOST_BIND:-127.0.0.1}:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
@@ -133,6 +187,8 @@ services:
   minio-init:
     image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     env_file: .env
+    environment:
+      MC_CONFIG_DIR: /tmp/.mc
     entrypoint: ["/bin/sh", "-c"]
     command: |
       set -eu
@@ -149,6 +205,44 @@ services:
     networks:
       - enshrouded_net
     restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  controller:
+    image: ${CONTROLLER_IMAGE:-powermountain/enshrouded-dedi-controller:latest}
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/controller/Dockerfile
+    restart: unless-stopped
+    environment:
+      ENSHROUDED_CONTAINER_NAME: ${ENSHROUDED_CONTAINER_NAME}
+      DOCKER_CONTROLLER_TOKEN: ${DOCKER_CONTROLLER_TOKEN}
+      ALLOW_INSECURE_DEFAULTS: ${ALLOW_INSECURE_DEFAULTS:-false}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${CONTROLLER_MEMORY_LIMIT:-128m}
+    cpus: ${CONTROLLER_CPU_LIMIT:-0.25}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2375/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5s
+    networks:
+      - enshrouded_net
 
 volumes:
   enshrouded_data:

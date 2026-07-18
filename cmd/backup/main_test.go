@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -21,6 +23,52 @@ func TestParseTimestamp(t *testing.T) {
 				t.Fatalf("parseTimestamp(%q) = %s, want %s", name, got, want)
 			}
 		})
+	}
+}
+
+func TestInternalTokenMiddleware(t *testing.T) {
+	const token = "backup-test-token-0123456789abcdef"
+	svc := &BackupService{cfg: Config{InternalToken: token}}
+	handler := svc.requireInternalToken(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/backups", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token got %d", recorder.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/backups", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("valid token got %d", recorder.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("health should be public, got %d", recorder.Code)
+	}
+}
+
+func TestValidateBackupConfigRejectsDefaults(t *testing.T) {
+	cfg := Config{
+		InternalToken: "internal-token-0123456789abcdef-0123456789",
+		DockerToken:   "controller-token-0123456789abcdef-0123456789",
+		AccessKey:     "non-default-access",
+		SecretKey:     "non-default-secret",
+	}
+	if err := validateBackupConfig(cfg); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	cfg.SecretKey = "changeme"
+	if err := validateBackupConfig(cfg); err == nil {
+		t.Fatal("default secret should be rejected")
 	}
 }
 

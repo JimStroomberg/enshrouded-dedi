@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -54,7 +54,9 @@ RUN mkdir -p /opt/steamcmd_win \
     && rm -f steamcmd.zip
 
 RUN useradd -m -d /home/steam -s /bin/bash steam \
-    && mkdir -p /data \
+    && mkdir -p /data /home/steam/.local/share \
+    && ln -s /data/steamcmd-home/.steam /home/steam/.steam \
+    && ln -s /data/steamcmd-home/.local/share/Steam /home/steam/.local/share/Steam \
     && chown -R steam:steam /data /opt/steamcmd /opt/steamcmd_win
 
 USER steam
@@ -62,8 +64,9 @@ WORKDIR /data
 ENV GAME_PORT=15636 QUERY_PORT=15637 SAVE_DIR=/data/savegame UPDATE_ON_START=true TZ=Etc/UTC
 
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY --chmod=755 healthcheck.py /healthcheck.py
 
-HEALTHCHECK --interval=30s --timeout=10s --retries=5 CMD bash -c "pgrep -f enshrouded_server || exit 1"
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 CMD ["python3", "/healthcheck.py"]
 
 EXPOSE 15636/tcp 15636/udp 15637/tcp 15637/udp
 
