@@ -1,12 +1,16 @@
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG WINEHQ_STABLE_VERSION=11.0.0.0~bookworm-1
 
 RUN dpkg --add-architecture i386 \
     && apt-get update \
-    && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://dl.winehq.org/wine-builds/winehq.key -o /etc/apt/keyrings/winehq-archive.key \
+    && curl -fsSL https://dl.winehq.org/wine-builds/debian/dists/bookworm/winehq-bookworm.sources -o /etc/apt/sources.list.d/winehq-bookworm.sources \
+    && apt-get update \
+    && apt-get install -y --install-recommends \
       wget \
       tzdata \
       xz-utils \
@@ -36,8 +40,8 @@ RUN dpkg --add-architecture i386 \
       libkrb5-3:i386 \
       libtcmalloc-minimal4:i386 \
       libdbus-1-3:i386 \
-      wine64 \
-      wine32 \
+      winehq-stable="${WINEHQ_STABLE_VERSION}" \
+    && test "$(wine --version)" = "wine-11.0" \
     && rm -rf /var/lib/apt/lists/*
 
 # SteamCMD (Linux)
